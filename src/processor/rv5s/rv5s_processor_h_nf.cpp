@@ -170,6 +170,9 @@ void RV5StageProcessorHNF::Step()
 
     if (currently_stalling || stalls_needed > 0)
     {
+        // KITES Phase 1 instrumentation: count each stall cycle actually consumed.
+        // This measures behavior; it does not change the H_NF hazard policy.
+        total_stall_cycles_++;  // Count one stall cycle actually consumed
         id_ex_reg_.reset();
         stall_fetch_and_decode_ = true;
     }

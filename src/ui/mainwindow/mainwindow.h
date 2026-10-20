@@ -9,6 +9,8 @@
 #include <QStackedWidget>
 #include <QThread>
 #include <QWidget>
+#include "common/assembled_program.h"
+#include <optional>
 
 namespace Kites
 {
@@ -33,6 +35,7 @@ class MainWindow : public QMainWindow
         CacheTabIndex,
         CompilerTabIndex,
         ProfilerTabIndex,
+        OptimizerTabIndex,
         TabCount
     };
 
@@ -48,7 +51,38 @@ public:
     void setUpUI();
     ~MainWindow();
 
+
 private:
+    // Benchmark data
+    struct PerformanceMetrics
+    {
+        unsigned int cycles = 0;
+        unsigned int stalls = 0;
+        unsigned int instructionsRetired = 0;
+        float cpi = 0.0f;
+    };
+
+    enum class BenchmarkStage
+    {
+        Idle,
+        OriginalRun,
+        OptimizedRun
+    };
+
+    BenchmarkStage m_benchmarkStage = BenchmarkStage::Idle;
+
+    PerformanceMetrics m_originalMetrics;
+    PerformanceMetrics m_optimizedMetrics;
+
+    std::optional<AssembledProgram> m_benchmarkOriginalProgram;
+    std::optional<AssembledProgram> m_benchmarkOptimizedProgram;
+    int m_benchmarkWindowSize = 0;
+
+    void startBenchmarkOriginalRun();
+    void startBenchmarkOptimizedRun();
+    void captureBenchmarkMetrics(PerformanceMetrics &metrics);
+
+    // Existing MainWindow methods
     void setUpStatusBar();
     void setUpToolBar();
     void setUpSidebar();
@@ -58,18 +92,20 @@ private:
     bool tryParseAndLoadProgram();
     void run();
     void processorChangeDialog();
+
     Ui::MainWindow *ui;
 
-    // QToolBar *m_mainToolbar = nullptr;
-    QListWidget       *m_sidebar           {nullptr};
-    QStackedWidget    *m_stackedTabs       {nullptr};
-    RegisterContainer *m_registerContainer {nullptr};
-    ProcessorManager  *m_processorManager  {nullptr};
-    QThread           *m_processorThread   {nullptr};
-    TabIndex           m_currentTabIndex   {TabIndex::EditorTabIndex};
-    ExecutionState     m_executionState    {ExecutionState::Stopped};
+    // Existing UI and processor members
+    QListWidget *m_sidebar{nullptr};
+    QStackedWidget *m_stackedTabs{nullptr};
+    RegisterContainer *m_registerContainer{nullptr};
+    ProcessorManager *m_processorManager{nullptr};
+    QThread *m_processorThread{nullptr};
+    TabIndex m_currentTabIndex{TabIndex::EditorTabIndex};
+    ExecutionState m_executionState{ExecutionState::Stopped};
 
-    std::array<KitesTab*, toIndex(TabIndex::TabCount)> m_tabs;
+    std::array<KitesTab *, toIndex(TabIndex::TabCount)> m_tabs;
+
 public slots:
     void processorChanged(const ProcessorType &vmType); // this will catch the signal from processor dialog
     void runFinishedSlot();

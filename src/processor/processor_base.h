@@ -115,6 +115,10 @@ class ProcessorBase : public QObject
     unsigned int stall_cycles_{};
     unsigned int branch_mispredictions_{};
 
+    // KITES Phase 1 contribution: cumulative stall cycles consumed, exposed to
+    // benchmark reporting. Keep separate from stall_cycles_, the active countdown.
+    unsigned int total_stall_cycles_{};
+
     std::string output_status_;
 
     MemoryController memory_controller_;

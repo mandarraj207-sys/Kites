@@ -238,6 +238,10 @@ void RV5StageProcessorHF::Step()
         id_ex_reg_.reset();
         // Skip pipeline_decode() - The instruction in IF/ID stays put.
         stall_fetch_and_decode_ = true;
+
+        // KITES Phase 1 instrumentation: count each stall cycle actually consumed.
+        // This measures behavior; it does not change the H_F hazard policy.
+        total_stall_cycles_++;
     }
     else
     {
