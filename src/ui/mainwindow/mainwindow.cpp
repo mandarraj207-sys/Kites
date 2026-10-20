@@ -12,6 +12,7 @@
 #include "ui/memory_tab/memorytab.h"
 #include "ui/processor_tab/processortab.h"
 #include "ui/profiler_tab/profilertab.h"
+#include "ui/optimizer_tab/optimizertab.h"
 #include "ui/theme/icon_manager.h"
 #include "ui_mainwindow.h"
 #include "utils/utils.h"
@@ -23,6 +24,8 @@
 #include <QWidgetAction>
 #include <QSplitter>
 #include <QMessageBox>
+#include <QDebug>
+#include <QPushButton>
 
 namespace Kites
 {
@@ -83,6 +86,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
             [this](const QString &errorMessage, int sourceLine)
             {
                 // first we enable the toolbar buttons
+
+                if (m_benchmarkStage != BenchmarkStage::Idle) {
+                    m_benchmarkStage = BenchmarkStage::Idle;
+                    m_benchmarkOriginalProgram.reset();
+                    m_benchmarkOptimizedProgram.reset();
+                }
+
                 runFinishedSlot();
                 auto editorTab = dynamic_cast<EditorTab *>(m_tabs[TabIndex::EditorTabIndex]);
                 if (editorTab)
@@ -269,6 +279,8 @@ void MainWindow::setUpSidebar()
     m_sidebar->addItem(new QListWidgetItem(iconManager.getIcon(Icon::Cache), "Cache"));
     m_sidebar->addItem(new QListWidgetItem(iconManager.getIcon(Icon::Compiler), "Compiler"));
     m_sidebar->addItem(new QListWidgetItem(iconManager.getIcon(Icon::Profiler), "Profiler"));
+    // Reuse the profiler icon until a dedicated optimizer icon is added.
+    m_sidebar->addItem(new QListWidgetItem(iconManager.getIcon(Icon::Profiler), "Optimizer"));
     m_sidebar->setIconSize(QSize(20, 20));
     m_sidebar->setMinimumWidth(48);
     m_sidebar->setCurrentRow(0);
@@ -389,18 +401,88 @@ void MainWindow::setUpMenubar()
             });
 }
 
+
 void MainWindow::setUpTabs()
 {
-    m_tabs[TabIndex::EditorTabIndex]    = new EditorTab(this);
-    m_tabs[TabIndex::MemoryTabIndex]    = new MemoryTab(this, m_processorManager->getMemoryController());
-    m_tabs[TabIndex::ProcessorTabIndex] = new ProcessorTab(this, m_processorManager);                      
-    m_tabs[TabIndex::CacheTabIndex]     = new CacheTab(this, m_processorManager->getMemoryController());
-    m_tabs[TabIndex::CompilerTabIndex]  = new CompilerTab(this);
-    m_tabs[TabIndex::ProfilerTabIndex]  = new ProfilerTab(this, m_processorManager->getProfiler());
-    // a little experiment
+    m_tabs[TabIndex::EditorTabIndex] = new EditorTab(this);
+
+    m_tabs[TabIndex::MemoryTabIndex] =
+        new MemoryTab(this, m_processorManager->getMemoryController());
+
+    m_tabs[TabIndex::ProcessorTabIndex] =
+        new ProcessorTab(this, m_processorManager);
+
+    m_tabs[TabIndex::CacheTabIndex] =
+        new CacheTab(this, m_processorManager->getMemoryController());
+
+    m_tabs[TabIndex::CompilerTabIndex] = new CompilerTab(this);
+
+    m_tabs[TabIndex::ProfilerTabIndex] =
+        new ProfilerTab(this, m_processorManager->getProfiler());
+
+    m_tabs[TabIndex::OptimizerTabIndex] = new OptimizerTab(
+        dynamic_cast<EditorTab *>(m_tabs[TabIndex::EditorTabIndex]),
+        this
+    );
+
+    // Connect optimized execution to the existing processor.
+    auto *optimizerTab =
+        dynamic_cast<OptimizerTab *>(m_tabs[TabIndex::OptimizerTabIndex]);
+
+    optimizerTab->setLoadHandler(
+        [this](const AssembledProgram &optimizedProgram)
+        {
+            m_processorManager->reset();
+            m_processorManager->loadProgram(optimizedProgram);
+            emit runProcessorSignal();
+        });
+
     connect(this, &MainWindow::processorChangedSignal,
             dynamic_cast<ProcessorTab *>(m_tabs[TabIndex::ProcessorTabIndex]),
             &ProcessorTab::onVMChanged);
+
+    optimizerTab->setBenchmarkHandler(
+        [this](const AssembledProgram &originalProgram,
+                const AssembledProgram &optimizedProgram,
+                int windowSize)
+        {
+            // KITES Phase 1 contribution: let the user choose the processor mode per benchmark.
+            // Select the processor configuration for BOTH benchmark runs so the
+            // original and optimized programs are compared under identical conditions.
+            QMessageBox configurationDialog(this);
+            configurationDialog.setWindowTitle("Choose Benchmark Processor");
+            configurationDialog.setText(
+                "Select the processor configuration for this benchmark.\n\n"
+                "H_NF is the validated Phase 1 configuration. H_F is available for\n"
+                "selection but is experimental and has not yet been validated.");
+            configurationDialog.setIcon(QMessageBox::Question);
+
+            QAbstractButton *noForwardingButton = configurationDialog.addButton(
+                "H_NF — No Forwarding (Phase 1)", QMessageBox::AcceptRole);
+            QAbstractButton *forwardingButton = configurationDialog.addButton(
+                "H_F — Forwarding (Experimental)", QMessageBox::ActionRole);
+            configurationDialog.addButton(QMessageBox::Cancel);
+            configurationDialog.exec();
+
+            if (configurationDialog.clickedButton() == noForwardingButton)
+            {
+                processorChanged(ProcessorType::RV5Stage_H_NF);
+            }
+            else if (configurationDialog.clickedButton() == forwardingButton)
+            {
+                processorChanged(ProcessorType::RV5Stage_H_F);
+            }
+            else
+            {
+                return; // User cancelled; don't start a benchmark.
+            }
+
+            m_benchmarkOriginalProgram = originalProgram;
+            m_benchmarkOptimizedProgram = optimizedProgram;
+            m_benchmarkWindowSize = windowSize;
+
+            startBenchmarkOriginalRun();
+        });
 
     m_stackedTabs->addWidget(m_tabs[TabIndex::EditorTabIndex]);
     m_stackedTabs->addWidget(m_tabs[TabIndex::MemoryTabIndex]);
@@ -408,7 +490,11 @@ void MainWindow::setUpTabs()
     m_stackedTabs->addWidget(m_tabs[TabIndex::CacheTabIndex]);
     m_stackedTabs->addWidget(m_tabs[TabIndex::CompilerTabIndex]);
     m_stackedTabs->addWidget(m_tabs[TabIndex::ProfilerTabIndex]);
+    m_stackedTabs->addWidget(m_tabs[TabIndex::OptimizerTabIndex]);
+
+
 }
+
 
 bool MainWindow::tryParseAndLoadProgram()
 {
@@ -474,6 +560,7 @@ void MainWindow::run()
         runFinishedSlot();
     }
 }
+
 void MainWindow::processorChangeDialog()
 {
     ProcessorDialog dialog(this, m_processorManager->getProcessorType());
@@ -501,10 +588,138 @@ void MainWindow::processorChanged(const ProcessorType &vmType)
     // well also have to change the processor design from here later
 }
 
+
+void MainWindow::startBenchmarkOriginalRun()
+{
+    if (!m_benchmarkOptimizedProgram)
+    {
+        qDebug() << "[Benchmark] Optimized program is missing.";
+
+        m_benchmarkStage = BenchmarkStage::Idle;
+        m_benchmarkOriginalProgram.reset();
+        m_benchmarkOptimizedProgram.reset();
+
+        QMessageBox::warning(
+            this, "Benchmark",
+            "Optimized program is missing.");
+
+        auto *editor =
+            dynamic_cast<EditorTab *>(m_tabs[TabIndex::EditorTabIndex]);
+
+        if (editor) {
+            editor->setCanWrite(true);
+        }
+
+        return;
+    }
+    m_originalMetrics = PerformanceMetrics{};
+    m_optimizedMetrics = PerformanceMetrics{};
+    m_benchmarkStage = BenchmarkStage::OriginalRun;
+
+    auto *editor =
+        dynamic_cast<EditorTab *>(m_tabs[TabIndex::EditorTabIndex]);
+
+    if (editor) {
+        editor->setCanWrite(false);
+        editor->setExpandedLocked(true);
+    }
+
+    qDebug() << "[Benchmark] Processor type:"
+         << static_cast<int>(m_processorManager->getProcessorType());
+
+    m_processorManager->clearBreakpoints();
+    m_processorManager->reset();
+    m_processorManager->loadProgram(*m_benchmarkOriginalProgram);
+
+    emit runProcessorSignal();
+}
+
+void MainWindow::startBenchmarkOptimizedRun()
+{
+    if (!m_benchmarkOptimizedProgram)
+    {
+        qDebug() << "[Benchmark] Optimized program is missing.";
+
+        m_benchmarkStage = BenchmarkStage::Idle;
+        QMessageBox::warning(
+            this, "Benchmark",
+            "Optimized program is missing.");
+        return;
+    }
+
+    qDebug() << "[Benchmark] Loading optimized program.";
+    qDebug() << "[Benchmark] Intermediate code size:"
+             << m_benchmarkOptimizedProgram->intermediate_code.size();
+    qDebug() << "[Benchmark] Text buffer size:"
+             << m_benchmarkOptimizedProgram->text_buffer.size();
+
+    m_processorManager->clearBreakpoints();
+    m_processorManager->reset();
+    m_processorManager->loadProgram(*m_benchmarkOptimizedProgram);
+
+    qDebug() << "[Benchmark] Optimized program loaded; starting processor.";
+
+    emit runProcessorSignal();
+}
+
+// KITES Phase 1 contribution: capture each run and sequence original then optimized execution.
 void MainWindow::runFinishedSlot()
 {
-    auto *editor = dynamic_cast<EditorTab *>(m_tabs[TabIndex::EditorTabIndex]);
-    editor->setCanWrite(true); // re-enable writing in editor when vm stops
+    qDebug() << "[Benchmark] runFinishedSlot entered; stage ="
+         << static_cast<int>(m_benchmarkStage);
+
+    if (m_benchmarkStage == BenchmarkStage::OriginalRun)
+    {
+        captureBenchmarkMetrics(m_originalMetrics);
+
+        m_benchmarkStage = BenchmarkStage::OptimizedRun;
+        qDebug() << "[Benchmark] Original finished; starting optimized run";
+        startBenchmarkOptimizedRun();
+        return;
+    }
+
+    if (m_benchmarkStage == BenchmarkStage::OptimizedRun)
+    {
+        captureBenchmarkMetrics(m_optimizedMetrics);
+
+        auto *optimizerTab =
+            dynamic_cast<OptimizerTab *>(
+                m_tabs[TabIndex::OptimizerTabIndex]);
+
+        if (optimizerTab) {
+            OptimizerBenchmarkMetrics original{
+                m_originalMetrics.cycles,
+                m_originalMetrics.stalls,
+                m_originalMetrics.instructionsRetired,
+                m_originalMetrics.cpi
+            };
+
+            OptimizerBenchmarkMetrics optimized{
+                m_optimizedMetrics.cycles,
+                m_optimizedMetrics.stalls,
+                m_optimizedMetrics.instructionsRetired,
+                m_optimizedMetrics.cpi
+            };
+
+            qDebug() << "[Benchmark] Both runs finished; showing results";
+
+            optimizerTab->showBenchmarkResults(
+                m_benchmarkWindowSize,
+                original,
+                optimized);
+        }
+
+        m_benchmarkStage = BenchmarkStage::Idle;
+        m_benchmarkOriginalProgram.reset();
+        m_benchmarkOptimizedProgram.reset();
+    }
+
+    auto *editor =
+    dynamic_cast<EditorTab *>(m_tabs[TabIndex::EditorTabIndex]);
+
+    if (editor) {
+        editor->setCanWrite(true);
+    } // re-enable writing in editor when vm stops
     editor->setExpandedLocked(false);
     editor->clearHighlights(); // we clear any highlights when processor stops
     // other we are not alble to move the cursor as the paint
@@ -590,7 +805,7 @@ void MainWindow::themeChangedSlot([[maybe_unused]] const QString &themeId)
 
     // sidebar icons
     static const std::array<Icon, toIndex(TabIndex::TabCount)> sidebarIcons = {
-        Icon::Editor, Icon::Memory, Icon::Processor, Icon::Cache, Icon::Compiler, Icon::Profiler};
+        Icon::Editor, Icon::Memory, Icon::Processor, Icon::Cache, Icon::Compiler, Icon::Profiler, Icon::Profiler};
     for (int row = 0; row < m_sidebar->count(); ++row)
     {
         if (row < static_cast<int>(sidebarIcons.size()))
@@ -621,4 +836,25 @@ MainWindow::~MainWindow()
     }
     // delete ui;
 }
+
+
+void MainWindow::captureBenchmarkMetrics(PerformanceMetrics &metrics)
+{
+    metrics.cycles = m_processorManager->getCycles();
+    metrics.instructionsRetired =
+        m_processorManager->getInstructionsRetired();
+
+    // Calculate CPI from the metrics captured for this run.
+    // CPI = cycles / instructions retired.
+    metrics.cpi = metrics.instructionsRetired > 0
+        ? static_cast<float>(metrics.cycles) /
+              static_cast<float>(metrics.instructionsRetired)
+        : 0.0f;
+
+    // Keep the existing API for now; its value is not yet verified
+    // to represent cumulative stall cycles.
+    metrics.stalls = m_processorManager->getTotalStallCycles();
+}
+
+
 } // namespace Kites

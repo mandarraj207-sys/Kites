@@ -17,7 +17,8 @@ void RV5StageVM_Base::Run()
 
         // if we hit a break point (and it's a new PC), we pause execution
         // This prevents firing the same breakpoint multiple times during stalls
-        if (std::find(breakpoints_.begin(), breakpoints_.end(), program_counter_) !=
+        if (program_counter_ < program_size_ &&
+            std::find(breakpoints_.begin(), breakpoints_.end(), program_counter_) !=
                 breakpoints_.end() && program_counter_ != last_breakpoint_pc_)
         {
             pause_requested_ = true;
@@ -93,6 +94,7 @@ void RV5StageVM_Base::Reset()
     stall_cycles_         = 0;
     pc_redirected_        = false;
     last_breakpoint_pc_.reset(); // Clear breakpoint tracking on reset
+    total_stall_cycles_ = 0;
 
     registers_.Reset();
     memory_controller_.reset();
@@ -803,6 +805,26 @@ uint64_t RV5StageVM_Base::execute_double()
 
 bool RV5StageVM_Base::is_pipeline_drained() const
 {
+    const bool drained =
+        if_id_reg_.pc == INVALID_PC &&
+        id_ex_reg_.pc == INVALID_PC &&
+        ex_mem_reg_.pc == INVALID_PC &&
+        mem_wb_reg_.pc == INVALID_PC &&
+        if_id_reg_.instruction == NOP &&
+        id_ex_reg_.instruction == NOP &&
+        ex_mem_reg_.instruction == NOP &&
+        mem_wb_reg_.instruction == NOP &&
+        !ex_mem_reg_.reg_write &&
+        !ex_mem_reg_.mem_read &&
+        !ex_mem_reg_.mem_write &&
+        !mem_wb_reg_.reg_write;
+
+    return drained;
+}
+
+/*
+bool RV5StageVM_Base::is_pipeline_drained() const
+{
     // A stage holds a real instruction (possibly an actual `nop`) unless its PC is
     // INVALID_PC, which is what flushes, stalls and fetches past the end leave behind.
     if (if_id_reg_.pc != INVALID_PC || id_ex_reg_.pc != INVALID_PC ||
@@ -827,6 +849,7 @@ bool RV5StageVM_Base::is_pipeline_drained() const
 
     return true;
 }
+*/
 
 void RV5StageVM_Base::Undo()
 {

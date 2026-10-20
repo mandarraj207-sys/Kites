@@ -52,6 +52,7 @@ public:
     void setStepDelay(unsigned int delay);
 
     void setBreakpoints(const std::vector<uint64_t> &breakpoints);
+    void clearBreakpoints();
 
     RegisterFile *getRegisterFile() const;
     MemoryController *getMemoryController() const;
@@ -66,6 +67,7 @@ public:
     float getIPC() const;
     unsigned int getBranchMispredictions() const;
     unsigned int getStallCycles() const;
+    unsigned int getTotalStallCycles() const;
     unsigned int getCycles() const;
     unsigned int getInstructionsRetired() const;
 private:

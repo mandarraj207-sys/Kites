@@ -300,6 +300,12 @@ unsigned int ProcessorManager::getStallCycles() const
     return m_currentProcessor->stall_cycles_;
 }
 
+// KITES Phase 1 contribution: expose cumulative stall accounting to the benchmark UI.
+unsigned int ProcessorManager::getTotalStallCycles() const
+{
+    return m_currentProcessor->total_stall_cycles_;
+}
+
 unsigned int ProcessorManager::getCycles() const
 {
     return m_currentProcessor->cycle_s_;
@@ -308,6 +314,11 @@ unsigned int ProcessorManager::getCycles() const
 unsigned int ProcessorManager::getInstructionsRetired() const
 {
     return m_currentProcessor->instructions_retired_;
+}
+
+void ProcessorManager::clearBreakpoints()
+{
+    m_currentProcessor->SetBreakpoints({});
 }
 
 }//namespace Kites
