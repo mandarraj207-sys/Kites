@@ -19,6 +19,7 @@
 #include <iostream>
 #include <thread>
 #include <tuple>
+#include <QDebug>
 
 namespace Kites
 {
@@ -185,6 +186,12 @@ void RV5StageProcessorHNF::Step()
     fetch_and_advance_pc(stall_fetch_and_decode_);
 
     cycle_s_++;
+
+    qDebug() << "[STEP]"
+         << "PC:" << program_counter_
+         << "Cycles:" << cycle_s_
+         << "Retired:" << instructions_retired_
+         << "Stalls:" << total_stall_cycles_;
 
     finalize_step_delta();
 

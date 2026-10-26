@@ -22,4 +22,6 @@ CMakeLists.txt.user
 .cph
 gtest_filter.
 .vs/
-gtest_filter.py
+gtest_filter.py/build-phase1/
+/build/
+/build-phase1/
