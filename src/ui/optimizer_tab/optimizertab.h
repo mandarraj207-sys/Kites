@@ -8,6 +8,7 @@
 #include <optional>
 
 class QSpinBox;
+class QComboBox;
 class QLabel;
 class QPlainTextEdit;
 class QPushButton;
@@ -52,6 +53,7 @@ private:
 
     EditorTab *m_editor = nullptr;
     QSpinBox *m_windowSizeSpinBox = nullptr;
+    QComboBox *m_hazardModelComboBox = nullptr;
     int m_optimizedWindowSize = 4;
     QLabel *m_statusLabel = nullptr;
     QPlainTextEdit *m_originalOutput = nullptr;
