@@ -21,10 +21,16 @@
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QSplitter>
 #include <QProgressBar>
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QAbstractItemView>
+#include <QSyntaxHighlighter>
+#include <QTextCharFormat>
+#include <QRegularExpression>
+#include <QFontDatabase>
+#include <QColor>
 
 #include <algorithm>
 #include <filesystem>
@@ -34,8 +40,85 @@
 #include <string>
 #include <vector>
 
+
+
+namespace {
+
+class InstructionListingHighlighter : public QSyntaxHighlighter {
+public:
+    explicit InstructionListingHighlighter(QTextDocument *document)
+        : QSyntaxHighlighter(document) {}
+
+protected:
+    void highlightBlock(const QString &text) override {
+        // Subtle green background makes reordered instructions stand out.
+        if (text.contains("| MOVED |")) {
+            QTextCharFormat moved;
+            moved.setBackground(QColor(40, 150, 80, 55));
+            setFormat(0, text.size(), moved);
+        }
+
+        QTextCharFormat opcodeFormat;
+        opcodeFormat.setForeground(QColor("#569CD6"));
+        opcodeFormat.setFontWeight(QFont::DemiBold);
+
+        QTextCharFormat registerFormat;
+        registerFormat.setForeground(QColor("#4EC9B0"));
+
+        QTextCharFormat immediateFormat;
+        immediateFormat.setForeground(QColor("#CE9178"));
+
+        static const QRegularExpression opcodeRegex(
+            R"(\b(addi|add|sub|mul|and|or|xor|sll|srl|sra|slt|sltu|"
+            R"(andi|ori|xori|slti|sltiu|lb|lh|lw|ld|lbu|lhu|lwu|"
+            R"(sb|sh|sw|sd|lui|auipc|nop|mv|li|la|"
+            R"(csrrw|csrrs|csrrc|csrrwi|csrrsi|csrrci)\b)",
+            QRegularExpression::CaseInsensitiveOption);
+
+        static const QRegularExpression registerRegex(
+            R"(\b(?:x(?:[0-9]|[12][0-9]|3[01])|zero|ra|sp|gp|tp|"
+            R"(t[0-6]|s(?:[0-9]|1[01])|a[0-7])\b)",
+            QRegularExpression::CaseInsensitiveOption);
+
+        static const QRegularExpression numberRegex(
+            R"(\b-?(?:0x[0-9a-fA-F]+|[0-9]+)\b)");
+
+        auto applyRegex = [&](const QRegularExpression &regex,
+                              const QTextCharFormat &format) {
+            auto match = regex.globalMatch(text);
+            while (match.hasNext()) {
+                const auto item = match.next();
+                setFormat(item.capturedStart(), item.capturedLength(), format);
+            }
+        };
+
+        applyRegex(opcodeRegex, opcodeFormat);
+        applyRegex(registerRegex, registerFormat);
+        applyRegex(numberRegex, immediateFormat);
+    }
+};
+
+} // namespace
+
 namespace Kites
 {
+
+    static void printInstructions(
+        const std::vector<ICUnit>& instructions,
+        const char* title)
+    {
+        qDebug().noquote() << "\n====" << title << "====";
+
+        for (std::size_t i = 0; i < instructions.size(); ++i) {
+            std::ostringstream out;
+            out << instructions[i];
+
+            qDebug().noquote()
+                << QString("[%1] %2")
+                       .arg(static_cast<qulonglong>(i))
+                       .arg(QString::fromStdString(out.str()));
+        }
+    }
 
 OptimizerTab::OptimizerTab(EditorTab *editor, QWidget *parent)
     : KitesTab(parent), m_editor(editor)
@@ -78,11 +161,55 @@ OptimizerTab::OptimizerTab(EditorTab *editor, QWidget *parent)
     m_statusLabel->setWordWrap(true);
     layout->addWidget(m_statusLabel);
 
-    m_output = new QPlainTextEdit(this);
-    m_output->setReadOnly(true);
-    m_output->setPlaceholderText(
-        "Optimized instruction preview appears here.");
-    layout->addWidget(m_output, 1);
+    auto *listingSplitter = new QSplitter(Qt::Horizontal, this);
+
+    auto *originalPanel = new QWidget(listingSplitter);
+    auto *originalLayout = new QVBoxLayout(originalPanel);
+    originalLayout->setContentsMargins(0, 0, 0, 0);
+
+    auto *originalHeading = new QLabel("Original instructions", originalPanel);
+    originalLayout->addWidget(originalHeading);
+
+    m_originalOutput = new QPlainTextEdit(originalPanel);
+    m_originalOutput->setReadOnly(true);
+    m_originalOutput->setLineWrapMode(QPlainTextEdit::NoWrap);
+    m_originalOutput->setPlaceholderText(
+        "Original instruction listing appears here.");
+    originalLayout->addWidget(m_originalOutput);
+
+    auto *optimizedPanel = new QWidget(listingSplitter);
+    auto *optimizedLayout = new QVBoxLayout(optimizedPanel);
+    optimizedLayout->setContentsMargins(0, 0, 0, 0);
+
+    auto *optimizedHeading = new QLabel("Optimized instructions", optimizedPanel);
+    optimizedLayout->addWidget(optimizedHeading);
+
+    m_optimizedOutput = new QPlainTextEdit(optimizedPanel);
+    m_optimizedOutput->setReadOnly(true);
+    m_optimizedOutput->setLineWrapMode(QPlainTextEdit::NoWrap);
+    m_optimizedOutput->setPlaceholderText(
+        "Optimized instruction listing appears here.");
+    optimizedLayout->addWidget(m_optimizedOutput);
+
+    const QFont listingFont =
+        QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    m_originalOutput->setFont(listingFont);
+    m_optimizedOutput->setFont(listingFont);
+
+    m_originalOutput->setStyleSheet(
+        "QPlainTextEdit { padding: 8px; }");
+    m_optimizedOutput->setStyleSheet(
+        "QPlainTextEdit { padding: 8px; }");
+
+    // Keep the highlighters alive for the lifetime of their text documents.
+    new InstructionListingHighlighter(m_originalOutput->document());
+    new InstructionListingHighlighter(m_optimizedOutput->document());
+
+    listingSplitter->addWidget(originalPanel);
+    listingSplitter->addWidget(optimizedPanel);
+    listingSplitter->setStretchFactor(0, 1);
+    listingSplitter->setStretchFactor(1, 1);
+    layout->addWidget(listingSplitter, 1);
 
     connect(m_windowSizeSpinBox,
             qOverload<int>(&QSpinBox::valueChanged),
@@ -137,7 +264,7 @@ void OptimizerTab::benchmarkOptimizedProgram()
     m_benchmarkHandler(
         *m_originalProgram,
         *m_optimizedProgram,
-        m_windowSizeSpinBox->value());
+        m_optimizedWindowSize);
 }
 
 void OptimizerTab::loadOptimizedProgram()
@@ -175,7 +302,8 @@ void OptimizerTab::optimizeCurrentSource()
 
     m_loadButton->setEnabled(false);
     m_benchmarkButton->setEnabled(false);
-    m_output->clear();
+    m_originalOutput->clear();
+    m_optimizedOutput->clear();
 
     if (!m_editor) {
         m_statusLabel->setText("Error: editor connection is missing.");
@@ -253,10 +381,29 @@ void OptimizerTab::optimizeCurrentSource()
             }
         }
 
+        const std::size_t windowSizeUsed =
+            static_cast<std::size_t>(m_windowSizeSpinBox->value());
+
+        m_optimizedWindowSize = static_cast<int>(windowSizeUsed);
+
+        printInstructions(instructions, "BEFORE SCHEDULING");
+
         const auto result =
-            optimizer::scheduleLoadUseHazards(
-                instructions,
-                optimizer::g_scheduler_window_size);
+            optimizer::scheduleLoadUseHazards(instructions, windowSizeUsed);
+
+        printInstructions(result.instructions, "AFTER SCHEDULING");
+
+        qDebug() << "Original instruction count:" << instructions.size();
+        qDebug() << "Scheduled instruction count:" << result.instructions.size();
+        qDebug() << "Instructions moved:" << result.moved_instructions;
+
+        for (std::size_t i = 0; i < result.instructions.size(); ++i) {
+            std::ostringstream line;
+            line << result.instructions[i];
+
+            qDebug() << "Scheduled" << i
+                     << ":" << QString::fromStdString(line.str());
+        }
 
         // Reconstruct the intermediate-code entries in scheduled order.
         // The scheduler changes instruction_index, so match using the original
@@ -350,16 +497,90 @@ void OptimizerTab::optimizeCurrentSource()
         program.text_buffer =
             Kites::generateMachineCode(program.intermediate_code);
 
-        // Display the proposed ordering.
-        QString preview;
+        // Display both listings. Match whole instruction records so repeated
+        // instructions are handled as separate occurrences.
+        std::vector<bool> originalUsed(program.intermediate_code.size(), false);
+        std::vector<int> originalPositionForOptimized;
+        originalPositionForOptimized.reserve(program.intermediate_code.size());
 
-        for (const auto &entry : program.intermediate_code) {
-            std::ostringstream line;
-            line << entry.first;
-            preview += QString::fromStdString(line.str()) + '\n';
+        for (const auto &scheduledEntry : program.intermediate_code) {
+            const ICUnit &scheduled = scheduledEntry.first;
+            int matchedPosition = -1;
+
+            for (std::size_t i = 0; i < originalProgram.intermediate_code.size(); ++i) {
+                if (originalUsed[i])
+                    continue;
+
+                const ICUnit &original = originalProgram.intermediate_code[i].first;
+                const bool sameInstruction =
+                    original.line_number == scheduled.line_number &&
+                    original.opcode == scheduled.opcode &&
+                    original.rd == scheduled.rd &&
+                    original.rs1 == scheduled.rs1 &&
+                    original.rs2 == scheduled.rs2 &&
+                    original.rs3 == scheduled.rs3 &&
+                    original.imm == scheduled.imm &&
+                    original.csr == scheduled.csr &&
+                    original.rm == scheduled.rm &&
+                    original.label == scheduled.label;
+
+                if (sameInstruction) {
+                    originalUsed[i] = true;
+                    matchedPosition = static_cast<int>(i);
+                    break;
+                }
+            }
+
+            originalPositionForOptimized.push_back(matchedPosition);
         }
 
-        m_output->setPlainText(preview);
+        // Render aligned columns using a fixed-width font.
+        // Original # and optimized # are listing positions (1-based).
+        // Source line preserves the source location carried by each instruction.
+        QString originalPreview =
+            "ORG # | SRC LINE | INSTRUCTION\n"
+            "------+----------+----------------------------------------\n";
+
+        for (std::size_t i = 0;
+             i < originalProgram.intermediate_code.size(); ++i) {
+            const ICUnit &instruction =
+                originalProgram.intermediate_code[i].first;
+
+            std::ostringstream instructionText;
+            instructionText << instruction;
+
+            originalPreview += QString("%1 | %2 | %3\n")
+                .arg(static_cast<qulonglong>(i + 1), 5)
+                .arg(instruction.line_number, 8)
+                .arg(QString::fromStdString(instructionText.str()));
+        }
+
+        QString optimizedPreview =
+            "OPT # | ORG # | SRC LINE | STATUS    | INSTRUCTION\n"
+            "------+-------+----------+-----------+----------------------------------------\n";
+
+        for (std::size_t i = 0;
+             i < program.intermediate_code.size(); ++i) {
+            const ICUnit &instruction =
+                program.intermediate_code[i].first;
+
+            std::ostringstream instructionText;
+            instructionText << instruction;
+
+            const int originalPosition = originalPositionForOptimized[i];
+            const bool moved = originalPosition >= 0 &&
+                               originalPosition != static_cast<int>(i);
+
+            optimizedPreview += QString("%1 | %2 | %3 | %4 | %5\n")
+                .arg(static_cast<qulonglong>(i + 1), 5)
+                .arg(originalPosition >= 0 ? originalPosition + 1 : 0, 5)
+                .arg(instruction.line_number, 8)
+                .arg(moved ? "MOVED" : "UNCHANGED", -9)
+                .arg(QString::fromStdString(instructionText.str()));
+        }
+
+        m_originalOutput->setPlainText(originalPreview);
+        m_optimizedOutput->setPlainText(optimizedPreview);
 
         // Retain the complete program for the separate execution action.
         m_originalProgram = std::move(originalProgram);
@@ -381,7 +602,8 @@ void OptimizerTab::optimizeCurrentSource()
 
         m_optimizedProgram.reset();
         m_loadButton->setEnabled(false);
-        m_output->clear();
+        m_originalOutput->clear();
+    m_optimizedOutput->clear();
 
         m_statusLabel->setText("Optimization failed.");
 

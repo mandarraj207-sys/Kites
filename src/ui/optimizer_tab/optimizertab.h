@@ -52,8 +52,10 @@ private:
 
     EditorTab *m_editor = nullptr;
     QSpinBox *m_windowSizeSpinBox = nullptr;
+    int m_optimizedWindowSize = 4;
     QLabel *m_statusLabel = nullptr;
-    QPlainTextEdit *m_output = nullptr;
+    QPlainTextEdit *m_originalOutput = nullptr;
+    QPlainTextEdit *m_optimizedOutput = nullptr;
 
     QPushButton *m_optimizeButton = nullptr;
     QPushButton *m_loadButton = nullptr;

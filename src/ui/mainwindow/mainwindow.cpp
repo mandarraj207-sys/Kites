@@ -1,3 +1,5 @@
+#include <array>
+#include <cstdint>
 #include "mainwindow.h"
 #include "assembler/assembler.h"
 #include "common/assembled_program.h"
@@ -45,7 +47,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     m_processorManager->moveToThread(m_processorThread);
     m_processorThread->start();
 
-            
+
     m_registerContainer = new RegisterContainer(this, m_processorManager->getRegisterFile());
     QWidget *central = new QWidget(this);
     QHBoxLayout *mainLayout = new QHBoxLayout(central);
@@ -113,7 +115,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
                 }
             });
     connect(m_processorManager, &ProcessorManager::updateEditorHighlightSignal, this,
-            [this](const std::vector<std::pair<int,std::string>> &editorLines, 
+            [this](const std::vector<std::pair<int,std::string>> &editorLines,
             const std::vector<std::pair<int,std::string>> &disassemblyLines)
             {
                 auto editorTab = dynamic_cast<EditorTab *>(m_tabs[TabIndex::EditorTabIndex]);
@@ -122,7 +124,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
                     editorTab->highlightLines(editorLines, disassemblyLines);
                 }
             });
-    connect(&ThemeManager::getInstance(), &ThemeManager::themeChangedSignal, 
+    connect(&ThemeManager::getInstance(), &ThemeManager::themeChangedSignal,
             this, &MainWindow::themeChangedSlot);
 }
 
@@ -298,7 +300,7 @@ void MainWindow::setUpMenubar()
 
     QMenu *preferencesMenu = new QMenu("Preferences", this);
     QMenu *processorMenu   = new QMenu("Processor", this);
-    
+
     QAction *openAction  = new QAction(IconManager::getInstance().getIcon(Icon::Open), "Open", this);
     QAction *saveAction  = new QAction(IconManager::getInstance().getIcon(Icon::Save), "Save", this);
     QAction *exitAction  = new QAction("Exit", this);
@@ -501,12 +503,12 @@ bool MainWindow::tryParseAndLoadProgram()
     auto* editor = dynamic_cast<EditorTab*>(m_tabs[TabIndex::EditorTabIndex]);
     auto* profilerTab = dynamic_cast<ProfilerTab*>(m_tabs[TabIndex::ProfilerTabIndex]);
 
-    if(!editor || !profilerTab) 
+    if(!editor || !profilerTab)
     {
         QMessageBox::critical(this, "Error", "Editor or Profiler tab not found.");
         return false;
     }
-    editor->switchToExpandedView(); // switch to the expanded view 
+    editor->switchToExpandedView(); // switch to the expanded view
                                     //to show expanded pseudoinstructions
     editor->resetErrorLines();    // we reset previous error lines
     editor->setCanWrite(false);   // we disable writing in editor while vm is running
@@ -525,7 +527,7 @@ bool MainWindow::tryParseAndLoadProgram()
         buffer << in.rdbuf();
         editor->updateDisassemblyView(buffer.str());
         profilerTab->setSourceText(QString::fromStdString(rawText));
-        
+
         m_processorManager->loadProgram(assembledProgram);
         m_processorManager->setBreakpoints(editor->getBreakpoints());
         return true;
@@ -665,12 +667,22 @@ void MainWindow::startBenchmarkOptimizedRun()
 // KITES Phase 1 contribution: capture each run and sequence original then optimized execution.
 void MainWindow::runFinishedSlot()
 {
+    static std::array<uint64_t, 32> originalGprs{};
+
     qDebug() << "[Benchmark] runFinishedSlot entered; stage ="
          << static_cast<int>(m_benchmarkStage);
 
     if (m_benchmarkStage == BenchmarkStage::OriginalRun)
     {
         captureBenchmarkMetrics(m_originalMetrics);
+        {
+            auto* registers = m_processorManager->getRegisterFile();
+            for (std::size_t i = 0; i < originalGprs.size(); ++i) {
+                originalGprs[i] = registers->ReadGpr(
+                    static_cast<uint8_t>(i));
+            }
+            qDebug() << "[VERIFY] Saved original register values.";
+        }
 
         m_benchmarkStage = BenchmarkStage::OptimizedRun;
         qDebug() << "[Benchmark] Original finished; starting optimized run";
@@ -681,6 +693,26 @@ void MainWindow::runFinishedSlot()
     if (m_benchmarkStage == BenchmarkStage::OptimizedRun)
     {
         captureBenchmarkMetrics(m_optimizedMetrics);
+        {
+            auto* registers = m_processorManager->getRegisterFile();
+            bool registersMatch = true;
+
+            for (std::size_t i = 0; i < originalGprs.size(); ++i) {
+                const uint64_t optimizedValue = registers->ReadGpr(
+                    static_cast<uint8_t>(i));
+
+                if (originalGprs[i] != optimizedValue) {
+                    registersMatch = false;
+                    qDebug() << "[VERIFY] MISMATCH:"
+                             << "x" << i
+                             << "original =" << originalGprs[i]
+                             << "optimized =" << optimizedValue;
+                }
+            }
+
+            qDebug() << "[VERIFY] Register comparison:"
+                     << (registersMatch ? "PASS" : "FAIL");
+        }
 
         auto *optimizerTab =
             dynamic_cast<OptimizerTab *>(

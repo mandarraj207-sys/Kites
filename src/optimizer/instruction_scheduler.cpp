@@ -1,10 +1,6 @@
 /**
  * @file instruction_scheduler.cpp
- * @brief Conservative local instruction scheduling for Phase 1.
- *
- * KITES Phase 1 contribution: analyzes instruction dependencies and proposes
- * legal local reorderings. This is an extension to the existing KITES project;
- * the processor execution and hazard-detection implementation remain separate.
+ * @brief Conservative dependency-aware scheduling within basic blocks.
  */
 #include "optimizer/instruction_scheduler.h"
 
@@ -33,30 +29,26 @@ const std::unordered_set<std::string> kRTypeInteger = {
     "add", "sub", "sll", "slt", "sltu", "xor", "srl", "sra", "or", "and",
     "addw", "subw", "sllw", "srlw", "sraw", "mul", "mulh", "mulhsu", "mulhu",
     "div", "divu", "rem", "remu", "mulw", "divw", "divuw", "remw", "remuw"};
-
 const std::unordered_set<std::string> kITypeInteger = {
     "addi", "slti", "sltiu", "xori", "ori", "andi", "slli", "srli", "srai",
     "addiw", "slliw", "srliw", "sraiw"};
-
 const std::unordered_set<std::string> kLoads = {"lb", "lh", "lw", "ld", "lbu", "lhu", "lwu"};
 const std::unordered_set<std::string> kStores = {"sb", "sh", "sw", "sd"};
+const std::unordered_set<std::string> kControlFlow = {
+    "beq", "bne", "blt", "bge", "bltu", "bgeu", "jal", "jalr", "c.j", "c.jr",
+    "ecall", "ebreak", "mret", "sret"};
 
 bool contains(const std::unordered_set<std::string> &set, const std::string &value)
 {
     return set.find(value) != set.end();
 }
-
 void addRead(std::vector<std::string> &reads, const std::string &reg)
 {
-    if (!reg.empty())
-        reads.push_back(reg);
+    if (!reg.empty()) reads.push_back(reg);
 }
-
 void addWrite(std::vector<std::string> &writes, const std::string &reg)
 {
-    // x0 always reads as zero; writes to it have no architectural effect.
-    if (!reg.empty() && reg != "x0")
-        writes.push_back(reg);
+    if (!reg.empty() && reg != "x0") writes.push_back(reg);
 }
 
 InstructionInfo describe(const ICUnit &unit)
@@ -67,101 +59,194 @@ InstructionInfo describe(const ICUnit &unit)
     const std::string rs1 = unit.getRs1();
     const std::string rs2 = unit.getRs2();
 
-    // A labelled instruction may be a branch target. Do not move it.
-    if (!unit.getLabel().empty())
-        return info;
+    // Labels on ICUnits represent control-flow targets/references in the
+    // assembler's intermediate form. Keep such instructions immovable.
+    if (!unit.getLabel().empty() || contains(kControlFlow, op)) return info;
 
     if (contains(kRTypeInteger, op))
     {
         info.supported = true;
-        addRead(info.reads, rs1);
-        addRead(info.reads, rs2);
-        addWrite(info.writes, rd);
+        addRead(info.reads, rs1); addRead(info.reads, rs2); addWrite(info.writes, rd);
     }
     else if (contains(kITypeInteger, op))
     {
         info.supported = true;
-        addRead(info.reads, rs1);
-        addWrite(info.writes, rd);
+        addRead(info.reads, rs1); addWrite(info.writes, rd);
     }
     else if (contains(kLoads, op))
     {
-        info.supported = true;
-        info.is_load = true;
-        addRead(info.reads, rs1); // base register
-        addWrite(info.writes, rd);
+        info.supported = true; info.is_load = true;
+        addRead(info.reads, rs1); addWrite(info.writes, rd);
     }
     else if (contains(kStores, op))
     {
-        info.supported = true;
-        info.is_store = true;
-        addRead(info.reads, rs1); // base register
-        addRead(info.reads, rs2); // value being stored
+        info.supported = true; info.is_store = true;
+        addRead(info.reads, rs1); addRead(info.reads, rs2);
     }
     else if (op == "lui" || op == "auipc")
     {
-        info.supported = true;
-        addWrite(info.writes, rd);
+        info.supported = true; addWrite(info.writes, rd);
     }
-
-    // Branches, jumps, floating-point/CSR instructions, pseudo-instructions,
-    // fences, and unknown opcodes are deliberately unsupported in Phase 1.
     return info;
 }
 
 bool intersects(const std::vector<std::string> &a, const std::vector<std::string> &b)
 {
     for (const auto &reg : a)
-    {
-        if (std::find(b.begin(), b.end(), reg) != b.end())
-            return true;
-    }
+        if (std::find(b.begin(), b.end(), reg) != b.end()) return true;
     return false;
 }
 
 bool hasDependency(const InstructionInfo &a, const InstructionInfo &b)
 {
-    // Preserve RAW, WAR, and WAW ordering during static reordering.
+    // RAW, WAR, and WAW dependencies must retain their relative order.
     return intersects(a.writes, b.reads) || intersects(a.reads, b.writes) ||
            intersects(a.writes, b.writes);
 }
 
 bool canCross(const InstructionInfo &moving, const InstructionInfo &crossed)
 {
-    // Do not move an instruction across unsupported operations or memory
-    // operations. Phase 1 deliberately does not perform memory-alias analysis.
+    // Memory alias analysis is intentionally out of scope: memory ops are barriers.
     if (!moving.supported || !crossed.supported || moving.is_memory() || crossed.is_memory())
         return false;
-
-    // hasDependency covers both directions and all register dependency types.
     return !hasDependency(moving, crossed);
 }
 
-bool readsRegister(const InstructionInfo &info, const std::string &reg)
+bool hasRAWDependency(const InstructionInfo &producer, const InstructionInfo &consumer)
 {
-    return !reg.empty() &&
-           std::find(info.reads.begin(), info.reads.end(), reg) != info.reads.end();
+    // Only read-after-write dependencies impose a result-availability delay.
+    return intersects(producer.writes, consumer.reads);
 }
 
-bool writesRegister(const InstructionInfo &info, const std::string &reg)
+bool isControlFlow(const ICUnit &unit)
 {
-    return !reg.empty() &&
-           std::find(info.writes.begin(), info.writes.end(), reg) != info.writes.end();
+    return contains(kControlFlow, unit.getOpcode());
+}
+
+void updateIndicesIfMoved(ScheduleResult &result, const std::vector<ICUnit> &original)
+{
+    if (result.moved_instructions == 0 || original.empty()) return;
+    const unsigned int first_index = original.front().getInstructionIndex();
+    for (std::size_t i = 0; i < result.instructions.size(); ++i)
+        result.instructions[i].setInstructionIndex(first_index + static_cast<unsigned int>(i));
 }
 
 } // namespace
 
-ScheduleResult scheduleLoadUseHazards(const std::vector<ICUnit> &basic_block,
-                                      std::size_t window_size)
+ScheduleResult scheduleBasicBlock(const std::vector<ICUnit> &basic_block,
+                                  std::size_t window_size)
 {
     ScheduleResult result;
     result.instructions = basic_block;
+    if (basic_block.size() < 3 || window_size < 3) return result;
 
-    // At least three instructions are needed: load, consumer, candidate.
+    // Greedy local list scheduling: when adjacent instructions have a register
+    // dependency, try to move a later independent instruction between them.
+    // This covers load-use and ordinary ALU producer-consumer hazards.
+    for (std::size_t producer_index = 0; producer_index + 2 < result.instructions.size();
+         ++producer_index)
+    {
+        const InstructionInfo producer = describe(result.instructions[producer_index]);
+        const InstructionInfo consumer = describe(result.instructions[producer_index + 1]);
+        if (!producer.supported || !consumer.supported || producer.writes.empty() ||
+            !hasRAWDependency(producer, consumer))
+            continue;
+
+        const std::size_t remaining = result.instructions.size() - producer_index;
+        const std::size_t end = producer_index + std::min(window_size, remaining);
+        for (std::size_t candidate_index = producer_index + 2; candidate_index < end;
+             ++candidate_index)
+        {
+            const InstructionInfo candidate = describe(result.instructions[candidate_index]);
+            if (!candidate.supported || candidate.is_memory() ||
+                hasDependency(candidate, producer) || hasDependency(candidate, consumer))
+                continue;
+
+            bool safe = true;
+            for (std::size_t crossed_index = producer_index + 1;
+                 crossed_index < candidate_index; ++crossed_index)
+            {
+                if (!canCross(candidate, describe(result.instructions[crossed_index])))
+                {
+                    safe = false;
+                    break;
+                }
+            }
+            if (!safe) continue;
+
+            ICUnit moving = result.instructions[candidate_index];
+            result.instructions.erase(result.instructions.begin() +
+                                      static_cast<std::ptrdiff_t>(candidate_index));
+            result.instructions.insert(result.instructions.begin() +
+                                            static_cast<std::ptrdiff_t>(producer_index + 1),
+                                        moving);
+            ++result.moved_instructions;
+            // Re-evaluate this producer against its new adjacent instruction.
+            if (producer_index > 0) --producer_index;
+            break;
+        }
+    }
+
+    updateIndicesIfMoved(result, basic_block);
+    return result;
+}
+
+ScheduleResult scheduleProgramBlocks(const std::vector<ICUnit> &program,
+                                     const std::vector<std::size_t> &branch_target_indices,
+                                     std::size_t window_size)
+{
+    ScheduleResult result;
+    result.instructions = program;
+    if (program.empty()) return result;
+
+    std::vector<bool> leader(program.size(), false);
+    leader[0] = true;
+    for (std::size_t target : branch_target_indices)
+        if (target < program.size()) leader[target] = true;
+    for (std::size_t i = 0; i < program.size(); ++i)
+        if (isControlFlow(program[i]) && i + 1 < program.size()) leader[i + 1] = true;
+
+    std::vector<ICUnit> scheduled;
+    scheduled.reserve(program.size());
+    std::size_t block_start = 0;
+    for (std::size_t i = 1; i <= program.size(); ++i)
+    {
+        if (i == program.size() || leader[i])
+        {
+            std::vector<ICUnit> block(program.begin() + static_cast<std::ptrdiff_t>(block_start),
+                                      program.begin() + static_cast<std::ptrdiff_t>(i));
+            auto block_result = scheduleBasicBlock(block, window_size);
+            result.moved_instructions += block_result.moved_instructions;
+            scheduled.insert(scheduled.end(), block_result.instructions.begin(),
+                             block_result.instructions.end());
+            block_start = i;
+        }
+    }
+    result.instructions = std::move(scheduled);
+    updateIndicesIfMoved(result, program);
+    return result;
+}
+
+ScheduleResult scheduleLoadUseHazards(
+    const std::vector<ICUnit> &basic_block,
+    std::size_t window_size)
+{
+    return scheduleBasicBlock(basic_block, window_size);
+}
+
+/*
+ScheduleResult scheduleLoadUseHazards(const std::vector<ICUnit> &basic_block,
+                                      std::size_t window_size)
+{
+    // Keep the Phase 1 API focused on load-use hazards. General RAW scheduling
+    // remains available through scheduleBasicBlock().
+    ScheduleResult result;
+    result.instructions = basic_block;
     if (basic_block.size() < 3 || window_size < 3)
         return result;
 
-    for (std::size_t load_index = 0; load_index + 2 < result.instructions.size(); ++load_index)
+    for (std::size_t load_index = 0;
+         load_index + 2 < result.instructions.size(); ++load_index)
     {
         const InstructionInfo load_info = describe(result.instructions[load_index]);
         if (!load_info.supported || !load_info.is_load || load_info.writes.empty())
@@ -169,65 +254,50 @@ ScheduleResult scheduleLoadUseHazards(const std::vector<ICUnit> &basic_block,
 
         const std::string loaded_register = load_info.writes.front();
         const InstructionInfo consumer_info = describe(result.instructions[load_index + 1]);
-        if (!consumer_info.supported || !readsRegister(consumer_info, loaded_register))
+        if (!consumer_info.supported ||
+            !intersects(load_info.writes, consumer_info.reads))
             continue;
 
-        // Avoid overflow in load_index + window_size for unusually large values.
         const std::size_t remaining = result.instructions.size() - load_index;
-        const std::size_t span = std::min(window_size, remaining);
-        const std::size_t end = load_index + span; // exclusive
-
-        // Greedy search: find the first safe non-memory candidate in the window.
-        for (std::size_t candidate_index = load_index + 2; candidate_index < end;
-             ++candidate_index)
+        const std::size_t end = load_index + std::min(window_size, remaining);
+        for (std::size_t candidate_index = load_index + 2;
+             candidate_index < end; ++candidate_index)
         {
             const InstructionInfo candidate_info = describe(result.instructions[candidate_index]);
             if (!candidate_info.supported || candidate_info.is_memory() ||
-                readsRegister(candidate_info, loaded_register) ||
-                writesRegister(candidate_info, loaded_register))
+                std::find(candidate_info.reads.begin(), candidate_info.reads.end(), loaded_register)
+                    != candidate_info.reads.end() ||
+                std::find(candidate_info.writes.begin(), candidate_info.writes.end(), loaded_register)
+                    != candidate_info.writes.end())
                 continue;
 
-            bool safe_to_move = true;
-            // Moving the candidate to load_index + 1 crosses every instruction
-            // between its current position and the load's immediate consumer.
-            for (std::size_t crossed_index = candidate_index;
-                 crossed_index > load_index + 1; --crossed_index)
+            bool safe = true;
+            for (std::size_t crossed_index = load_index + 1;
+                 crossed_index < candidate_index; ++crossed_index)
             {
-                const InstructionInfo crossed_info = describe(result.instructions[crossed_index - 1]);
-                if (!canCross(candidate_info, crossed_info))
+                if (!canCross(candidate_info, describe(result.instructions[crossed_index])))
                 {
-                    safe_to_move = false;
+                    safe = false;
                     break;
                 }
             }
-
-            if (!safe_to_move)
+            if (!safe)
                 continue;
 
-            ICUnit candidate = result.instructions[candidate_index];
+            ICUnit moving = result.instructions[candidate_index];
             result.instructions.erase(result.instructions.begin() +
                                       static_cast<std::ptrdiff_t>(candidate_index));
             result.instructions.insert(result.instructions.begin() +
-                                            static_cast<std::ptrdiff_t>(load_index + 1),
-                                        candidate);
+                                           static_cast<std::ptrdiff_t>(load_index + 1),
+                                       moving);
             ++result.moved_instructions;
-            break; // One move fills this load's immediate gap.
+            break; // one filler per load-use dependency
         }
     }
 
-    // Only update indices if an instruction actually moved. The input remains
-    // untouched, and original source line numbers/labels are preserved.
-    if (result.moved_instructions > 0 && !result.instructions.empty())
-    {
-        const unsigned int first_index = basic_block.front().getInstructionIndex();
-        for (std::size_t i = 0; i < result.instructions.size(); ++i)
-        {
-            result.instructions[i].setInstructionIndex(
-                first_index + static_cast<unsigned int>(i));
-        }
-    }
-
+    updateIndicesIfMoved(result, basic_block);
     return result;
 }
+*/
 
 } // namespace Kites::optimizer

@@ -27,7 +27,7 @@ class MainWindow : public QMainWindow
 
     //not using enum class here because we want to use the enum values as array indices
     // and if we using enum class we will have to static cast them to size_t/int every time
-    enum TabIndex 
+    enum TabIndex
     {
         EditorTabIndex = 0,
         MemoryTabIndex,

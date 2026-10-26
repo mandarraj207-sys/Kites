@@ -1,9 +1,6 @@
 /**
  * @file instruction_scheduler.h
- * @brief Conservative local scheduler for reducing load-use stalls.
- *
- * Phase 1 supports an explicitly recognized subset of integer RISC-V
- * instructions. Call it on one straight-line basic block at a time.
+ * @brief Conservative dependency-aware scheduling within control-flow basic blocks.
  */
 #ifndef KITES_INSTRUCTION_SCHEDULER_H
 #define KITES_INSTRUCTION_SCHEDULER_H
@@ -23,21 +20,26 @@ struct ScheduleResult
 };
 
 /**
- * Reorders independent instructions to fill an immediate load-use gap.
- *
- * @param basic_block One straight-line basic block. It must not contain
- *                    branch/jump instructions or instructions from another
- *                    block. Instructions carrying labels are not moved.
- * @param window_size Maximum number of instructions considered starting at
- *                    the load, including the load itself. A value below 3
- *                    disables scheduling because no candidate can fit.
- *                    Defaults to the global g_scheduler_window_size setting.
- * @return A reordered copy. Unknown instructions and memory operations are
- *         conservative barriers. The input vector is never modified.
- *
- * This function does not mutate AssembledProgram, branch targets, symbol
- * tables, or GUI state; integration into the complete program is separate.
+ * Schedules a single basic block, never moving instructions across an
+ * unsupported operation or a memory operation. The block must not contain
+ * an interior branch/jump or instructions from another block.
  */
+ScheduleResult scheduleBasicBlock(
+    const std::vector<ICUnit> &basic_block,
+    std::size_t window_size = g_scheduler_window_size);
+
+/**
+ * Splits a program at control-flow boundaries and at known branch-target
+ * instruction indices, then schedules each block independently. Target
+ * indices are zero-based instruction indices, not byte addresses.
+ * Control-flow instructions remain at the end of their original block.
+ */
+ScheduleResult scheduleProgramBlocks(
+    const std::vector<ICUnit> &program,
+    const std::vector<std::size_t> &branch_target_indices,
+    std::size_t window_size = g_scheduler_window_size);
+
+/** Backwards-compatible name retained for callers from Phase 1. */
 ScheduleResult scheduleLoadUseHazards(
     const std::vector<ICUnit> &basic_block,
     std::size_t window_size = g_scheduler_window_size);
