@@ -5,7 +5,6 @@
 #include "custom_pseudo_manager/custom_pseudo_manager.h"
 #include "optimizer/forwarding_instruction_scheduler.h"
 #include "optimizer/instruction_scheduler.h"
-#include "optimizer/scheduler_config.h"
 #include "ui/editor_tab/editortab.h"
 
 #include "utils/utils.h"
@@ -40,6 +39,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace
@@ -138,12 +138,6 @@ OptimizerTab::OptimizerTab(EditorTab *editor, QWidget *parent) : KitesTab(parent
 
     auto *form = new QFormLayout();
 
-    m_windowSizeSpinBox = new QSpinBox(this);
-    m_windowSizeSpinBox->setRange(3, 64);
-    m_windowSizeSpinBox->setValue(static_cast<int>(optimizer::g_scheduler_window_size));
-
-    form->addRow("Scheduling window:", m_windowSizeSpinBox);
-
     // Keep the existing scheduler as the default baseline. The forwarding
     // scheduler can be selected independently for side-by-side experiments.
     m_hazardModelComboBox = new QComboBox(this);
@@ -215,8 +209,7 @@ OptimizerTab::OptimizerTab(EditorTab *editor, QWidget *parent) : KitesTab(parent
     listingSplitter->setStretchFactor(1, 1);
     layout->addWidget(listingSplitter, 1);
 
-    connect(m_windowSizeSpinBox, qOverload<int>(&QSpinBox::valueChanged), this, [](int value)
-            { optimizer::g_scheduler_window_size = static_cast<std::size_t>(value); });
+    
 
     connect(m_optimizeButton, &QPushButton::clicked, this, &OptimizerTab::optimizeCurrentSource);
 
@@ -232,7 +225,7 @@ void OptimizerTab::setLoadHandler(std::function<void(const AssembledProgram &)> 
 }
 
 void OptimizerTab::setBenchmarkHandler(
-    std::function<void(const AssembledProgram &, const AssembledProgram &, int)> handler)
+    std::function<void(const AssembledProgram &, const AssembledProgram &, bool)> handler)
 {
     m_benchmarkHandler = std::move(handler);
 }
@@ -254,7 +247,7 @@ void OptimizerTab::benchmarkOptimizedProgram()
         return;
     }
 
-    m_benchmarkHandler(*m_originalProgram, *m_optimizedProgram, m_optimizedWindowSize);
+    m_benchmarkHandler(*m_originalProgram, *m_optimizedProgram, m_optimizedWithForwarding);
 }
 
 void OptimizerTab::loadOptimizedProgram()
@@ -286,6 +279,7 @@ void OptimizerTab::optimizeCurrentSource()
     // never leave an older program available for accidental execution.
     m_originalProgram.reset();
     m_optimizedProgram.reset();
+    m_optimizedWithForwarding = false;
 
     m_loadButton->setEnabled(false);
     m_benchmarkButton->setEnabled(false);
@@ -334,53 +328,97 @@ void OptimizerTab::optimizeCurrentSource()
             instructions.push_back(entry.first);
         }
 
-        // This initial phase only supports straight-line code.
-        // Reordering across control-flow instructions can change behavior.
-        const std::vector<std::string> controlFlowOpcodes = {"beq",  "bne",  "blt",   "bge",
-                                                             "bltu", "bgeu", "jal",   "jalr",
-                                                             "c.j",  "c.jr", "ecall", "ebreak"};
+        // Code labels and control-flow instructions are hard scheduling
+        // boundaries. We schedule each straight-line region independently;
+        // no instruction crosses a label or a branch/jump/trap.
+        const bool forwardingEnabled =
+            m_hazardModelComboBox &&
+            m_hazardModelComboBox->currentData().toBool();
 
-        for (const auto &instruction : instructions)
-        {
-            const std::string opcode = instruction.getOpcode();
+        const std::unordered_set<std::string> controlFlowOpcodes = {
+            "beq", "bne", "blt", "bge", "bltu", "bgeu",
+            "jal", "jalr", "c.beqz", "c.bnez", "c.j", "c.jal",
+            "c.jr", "c.jalr", "ecall", "ebreak", "mret", "sret"
+        };
 
-            if (std::find(controlFlowOpcodes.begin(), controlFlowOpcodes.end(), opcode) !=
-                controlFlowOpcodes.end())
-            {
-                throw std::runtime_error("This initial optimizer phase does not support "
-                                         "branches, jumps, or traps. Try a straight-line "
-                                         "instruction sequence.");
-            }
-        }
+        const auto isControlFlow = [&](const ICUnit &instruction) {
+            return controlFlowOpcodes.count(instruction.getOpcode()) != 0;
+        };
 
-        // Non-data labels at nonzero addresses may point into the code.
-        // Until label-aware reordering is implemented, reject such programs.
+        // A code symbol's address is a byte address. KITES currently stores
+        // one 32-bit instruction per intermediate-code entry, so address / 4
+        // gives the corresponding zero-based instruction index.
+        std::vector<bool> labelBoundary(instructions.size(), false);
         for (const auto &symbolEntry : program.symbol_table)
         {
             const auto &symbol = symbolEntry.second;
+            if (symbol.isData || (symbol.address % 4) != 0)
+                continue;
 
-            if (!symbol.isData && symbol.address != 0)
-            {
-                throw std::runtime_error("This initial optimizer phase supports only code "
-                                         "labels at address zero. A nonzero code label was "
-                                         "found: " +
-                                         symbolEntry.first);
-            }
+            const std::size_t targetIndex =
+                static_cast<std::size_t>(symbol.address / 4);
+            if (targetIndex < labelBoundary.size())
+                labelBoundary[targetIndex] = true;
         }
 
-        const std::size_t windowSizeUsed = static_cast<std::size_t>(m_windowSizeSpinBox->value());
+        optimizer::ScheduleResult result;
+        result.instructions.reserve(instructions.size());
 
-        m_optimizedWindowSize = static_cast<int>(windowSizeUsed);
+        // Schedule [begin, end) as one straight-line region. Each region
+        // keeps its original length, so every label and branch remains at
+        // exactly the same instruction index and existing branch immediates
+        // remain valid.
+        const auto scheduleRegion = [&](std::size_t begin, std::size_t end) {
+            if (begin >= end)
+                return;
 
-        printInstructions(instructions, "BEFORE SCHEDULING");
+            std::vector<ICUnit> region(
+                instructions.begin() + static_cast<std::ptrdiff_t>(begin),
+                instructions.begin() + static_cast<std::ptrdiff_t>(end));
 
-        const bool forwardingEnabled =
-            m_hazardModelComboBox && m_hazardModelComboBox->currentData().toBool();
+            qDebug() << "[Optimizer] Forwarding enabled:" << forwardingEnabled;
 
-        const auto result =
-            forwardingEnabled
-                ? optimizer::scheduleForwardingBasicBlock(instructions, windowSizeUsed)
-                : optimizer::scheduleLoadUseHazards(instructions, windowSizeUsed);
+            qDebug() << "[Optimizer] Scheduler selected:"
+                        << (forwardingEnabled ? "H_F" : "H_NF");
+            
+            const auto regionResult =
+                forwardingEnabled
+                    ? optimizer::scheduleForwardingBasicBlock(region)
+                    : optimizer::scheduleBasicBlock(region);    
+
+            result.moved_instructions += regionResult.moved_instructions;
+            result.instructions.insert(result.instructions.end(),
+                                        regionResult.instructions.begin(),
+                                        regionResult.instructions.end());
+        };
+
+        std::size_t regionStart = 0;
+
+        for (std::size_t i = 0; i < instructions.size(); ++i)
+        {
+            // A label marks the beginning of a new basic block.
+            // Include the target instruction in the next scheduling region.
+            if (labelBoundary[i])
+            {
+                scheduleRegion(regionStart, i);
+                regionStart = i;
+            }
+
+            // Control-flow instructions must remain fixed.
+            if (isControlFlow(instructions[i]))
+            {
+                scheduleRegion(regionStart, i);
+
+                result.instructions.push_back(instructions[i]);
+                regionStart = i + 1;
+            }
+        }
+        scheduleRegion(regionStart, instructions.size());
+
+        // The regions are length-preserving. Refresh global instruction
+        // indices for clarity and for downstream consumers of ICUnit.
+        for (std::size_t i = 0; i < result.instructions.size(); ++i)
+            result.instructions[i].setInstructionIndex(static_cast<unsigned int>(i));
 
         printInstructions(result.instructions, "AFTER SCHEDULING");
 
@@ -559,6 +597,7 @@ void OptimizerTab::optimizeCurrentSource()
         // Retain the complete program for the separate execution action.
         m_originalProgram = std::move(originalProgram);
         m_optimizedProgram = std::move(program);
+        m_optimizedWithForwarding = forwardingEnabled;
 
         m_loadButton->setEnabled(true);
         m_benchmarkButton->setEnabled(true);
@@ -584,7 +623,7 @@ void OptimizerTab::optimizeCurrentSource()
     }
 }
 
-void OptimizerTab::showBenchmarkResults(int windowSize, const OptimizerBenchmarkMetrics &original,
+void OptimizerTab::showBenchmarkResults(const OptimizerBenchmarkMetrics &original,
                                         const OptimizerBenchmarkMetrics &optimized)
 {
     const auto reductionPercent = [](double before, double after)
@@ -621,7 +660,7 @@ void OptimizerTab::showBenchmarkResults(int windowSize, const OptimizerBenchmark
     root->addWidget(heading);
 
     auto *subtitle = new QLabel(
-        QString("Scheduling window: %1  ·  Original program vs. optimized program").arg(windowSize),
+        QString("Original program vs. optimized program"),
         &dialog);
     subtitle->setStyleSheet("color: palette(text); font-size: 10pt;");
     root->addWidget(subtitle);
@@ -657,24 +696,53 @@ void OptimizerTab::showBenchmarkResults(int windowSize, const OptimizerBenchmark
         cards->addWidget(card, 0, column);
     };
 
-    const auto changeText = [](double value)
+        const auto changeText = [](long long before, long long after)
     {
-        if (value > 0.005)
-            return QString("%1% lower").arg(value, 0, 'f', 2);
-        if (value < -0.005)
-            return QString("%1% higher").arg(-value, 0, 'f', 2);
-        return QString("No change");
+        const long long delta = before - after;
+        const double percent = before > 0
+            ? 100.0 * static_cast<double>(delta) / before
+            : 0.0;
+
+        if (delta > 0)
+            return QString("%1 fewer (%2% reduction)")
+                .arg(delta)
+                .arg(percent, 0, 'f', 2);
+
+        if (delta < 0)
+            return QString("%1 more (%2% increase)")
+                .arg(-delta)
+                .arg(-percent, 0, 'f', 2);
+
+        return QString("No change (0%)");
     };
 
+    const long long cyclesSaved =
+        static_cast<long long>(original.cycles) - optimized.cycles;
+
+    const long long stallsSaved =
+        static_cast<long long>(original.stalls) - optimized.stalls;
+
+    const double cpiImprovement = original.cpi > 0.0
+        ? 100.0 * (original.cpi - optimized.cpi) / original.cpi
+        : 0.0;
+
     addCard(0, "CYCLES SAVED",
-            QString::number(static_cast<long long>(original.cycles) - optimized.cycles),
-            changeText(cycleChange), cycleChange >= 0 ? "#21865b" : "#c04b45");
-    addCard(1, "STALL REDUCTION",
-            QString::number(static_cast<long long>(original.stalls) - optimized.stalls),
-            changeText(stallChange), stallChange >= 0 ? "#21865b" : "#c04b45");
-    addCard(2, "CPI IMPROVEMENT", changeText(cpiChange),
-            QString("%1 → %2").arg(original.cpi, 0, 'f', 3).arg(optimized.cpi, 0, 'f', 3),
-            cpiChange >= 0 ? "#21865b" : "#c04b45");
+            QString::number(cyclesSaved),
+            changeText(original.cycles, optimized.cycles),
+            cyclesSaved >= 0 ? "#21865b" : "#c04b45");
+
+    addCard(1, "STALL CYCLES SAVED",
+            QString::number(stallsSaved),
+            changeText(original.stalls, optimized.stalls),
+            stallsSaved >= 0 ? "#21865b" : "#c04b45");
+
+    addCard(2, "CPI IMPROVEMENT",
+            QString("%1%").arg(cpiImprovement, 0, 'f', 2),
+            QString("%1 → %2")
+                .arg(original.cpi, 0, 'f', 3)
+                .arg(optimized.cpi, 0, 'f', 3),
+            cpiImprovement >= 0 ? "#21865b" : "#c04b45");
+
 
     auto *comparisonTitle = new QLabel("Metric breakdown", &dialog);
     QFont sectionFont = comparisonTitle->font();

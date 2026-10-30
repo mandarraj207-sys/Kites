@@ -445,43 +445,17 @@ void MainWindow::setUpTabs()
 
     optimizerTab->setBenchmarkHandler(
         [this](const AssembledProgram &originalProgram,
-                const AssembledProgram &optimizedProgram,
-                int windowSize)
+               const AssembledProgram &optimizedProgram,
+               bool withForwarding)
         {
-            // KITES Phase 1 contribution: let the user choose the processor mode per benchmark.
-            // Select the processor configuration for BOTH benchmark runs so the
-            // original and optimized programs are compared under identical conditions.
-            QMessageBox configurationDialog(this);
-            configurationDialog.setWindowTitle("Choose Benchmark Processor");
-            configurationDialog.setText(
-                "Select the processor configuration for this benchmark.\n\n"
-                "H_NF is the validated Phase 1 configuration. H_F is available for\n"
-                "selection but is experimental and has not yet been validated.");
-            configurationDialog.setIcon(QMessageBox::Question);
-
-            QAbstractButton *noForwardingButton = configurationDialog.addButton(
-                "H_NF — No Forwarding (Phase 1)", QMessageBox::AcceptRole);
-            QAbstractButton *forwardingButton = configurationDialog.addButton(
-                "H_F — Forwarding (Experimental)", QMessageBox::ActionRole);
-            configurationDialog.addButton(QMessageBox::Cancel);
-            configurationDialog.exec();
-
-            if (configurationDialog.clickedButton() == noForwardingButton)
-            {
-                processorChanged(ProcessorType::RV5Stage_H_NF);
-            }
-            else if (configurationDialog.clickedButton() == forwardingButton)
-            {
-                processorChanged(ProcessorType::RV5Stage_H_F);
-            }
-            else
-            {
-                return; // User cancelled; don't start a benchmark.
-            }
+            // Use the same hazard model that was selected when suggestions
+            // were generated for BOTH benchmark runs.
+            processorChanged(withForwarding
+                ? ProcessorType::RV5Stage_H_F
+                : ProcessorType::RV5Stage_H_NF);
 
             m_benchmarkOriginalProgram = originalProgram;
             m_benchmarkOptimizedProgram = optimizedProgram;
-            m_benchmarkWindowSize = windowSize;
 
             startBenchmarkOriginalRun();
         });
@@ -735,10 +709,7 @@ void MainWindow::runFinishedSlot()
 
             qDebug() << "[Benchmark] Both runs finished; showing results";
 
-            optimizerTab->showBenchmarkResults(
-                m_benchmarkWindowSize,
-                original,
-                optimized);
+            optimizerTab->showBenchmarkResults(original, optimized);
         }
 
         m_benchmarkStage = BenchmarkStage::Idle;

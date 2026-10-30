@@ -3,7 +3,11 @@
  * @brief Conservative dependency-aware scheduling within basic blocks.
  */
 #include "optimizer/instruction_scheduler.h"
-
+#include <cstddef>
+#include <limits>
+#include <QDebug>
+#include <QString>
+#include <sstream>
 #include <algorithm>
 #include <string>
 #include <unordered_set>
@@ -133,58 +137,201 @@ void updateIndicesIfMoved(ScheduleResult &result, const std::vector<ICUnit> &ori
 
 } // namespace
 
-ScheduleResult scheduleBasicBlock(const std::vector<ICUnit> &basic_block,
-                                  std::size_t window_size)
+
+
+ScheduleResult scheduleBasicBlock(
+    const std::vector<ICUnit> &basic_block
+    )
 {
     ScheduleResult result;
     result.instructions = basic_block;
-    if (basic_block.size() < 3 || window_size < 3) return result;
 
-    // Greedy local list scheduling: when adjacent instructions have a register
-    // dependency, try to move a later independent instruction between them.
-    // This covers load-use and ordinary ALU producer-consumer hazards.
-    for (std::size_t producer_index = 0; producer_index + 2 < result.instructions.size();
-         ++producer_index)
+
+    const std::size_t n = basic_block.size();
+    qDebug() << "[H_NF] Received block size:" << n;
+    if (n < 2)
+        return result;
+
+    std::size_t region_start = 0;
+
+    while (region_start < n)
     {
-        const InstructionInfo producer = describe(result.instructions[producer_index]);
-        const InstructionInfo consumer = describe(result.instructions[producer_index + 1]);
-        if (!producer.supported || !consumer.supported || producer.writes.empty() ||
-            !hasRAWDependency(producer, consumer))
-            continue;
+        const InstructionInfo first =
+            describe(basic_block[region_start]);
 
-        const std::size_t remaining = result.instructions.size() - producer_index;
-        const std::size_t end = producer_index + std::min(window_size, remaining);
-        for (std::size_t candidate_index = producer_index + 2; candidate_index < end;
-             ++candidate_index)
+        // Loads may move around independent arithmetic instructions.
+        // Stores remain barriers because memory alias analysis is not implemented.
+        if (!first.supported || first.is_store)
         {
-            const InstructionInfo candidate = describe(result.instructions[candidate_index]);
-            if (!candidate.supported || candidate.is_memory() ||
-                hasDependency(candidate, producer) || hasDependency(candidate, consumer))
-                continue;
+            ++region_start;
+            continue;
+        }
 
-            bool safe = true;
-            for (std::size_t crossed_index = producer_index + 1;
-                 crossed_index < candidate_index; ++crossed_index)
+        std::size_t region_end = region_start;
+        while (region_end < n)
+        {
+            const InstructionInfo info =
+                describe(basic_block[region_end]);
+
+            if (!info.supported || info.is_store)
+                break;
+
+            ++region_end;
+        }
+
+        const std::size_t count = region_end - region_start;
+        if (count < 2)
+        {
+            region_start = region_end;
+            continue;
+        }
+
+        std::vector<InstructionInfo> nodes(count);
+        for (std::size_t i = 0; i < count; ++i)
+            nodes[i] = describe(basic_block[region_start + i]);
+
+        // DAG edges preserve every original RAW, WAR, and WAW dependency.
+        std::vector<std::vector<bool>> edges(
+            count, std::vector<bool>(count, false));
+
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            for (std::size_t j = i + 1; j < count; ++j)
             {
-                if (!canCross(candidate, describe(result.instructions[crossed_index])))
+                // Preserve register dependencies and the original order of
+                // loads. Loads may move relative to independent ALU ops, but
+                // we do not perform memory-dependence/alias analysis.
+                const bool loadOrder =
+                    nodes[i].is_load && nodes[j].is_load;
+                edges[i][j] =
+                    hasDependency(nodes[i], nodes[j]) || loadOrder;
+            }
+        }
+
+        // Longest dependency-chain length from each node.
+        std::vector<std::size_t> critical_path(count, 1);
+
+        for (std::size_t i = count; i-- > 0;)
+        {
+            for (std::size_t j = i + 1; j < count; ++j)
+            {
+                if (edges[i][j])
                 {
-                    safe = false;
-                    break;
+                    critical_path[i] = std::max(
+                        critical_path[i], critical_path[j] + 1);
                 }
             }
-            if (!safe) continue;
-
-            ICUnit moving = result.instructions[candidate_index];
-            result.instructions.erase(result.instructions.begin() +
-                                      static_cast<std::ptrdiff_t>(candidate_index));
-            result.instructions.insert(result.instructions.begin() +
-                                            static_cast<std::ptrdiff_t>(producer_index + 1),
-                                        moving);
-            ++result.moved_instructions;
-            // Re-evaluate this producer against its new adjacent instruction.
-            if (producer_index > 0) --producer_index;
-            break;
         }
+
+        std::vector<bool> scheduled(count, false);
+        std::vector<std::size_t> order;
+        std::vector<InstructionInfo> scheduled_info;
+        order.reserve(count);
+        scheduled_info.reserve(count);
+
+        while (order.size() < count)
+        {
+            std::size_t best = count;
+            std::size_t best_stalls =
+                std::numeric_limits<std::size_t>::max();
+            std::size_t best_path = 0;
+
+            // Consider ALL ready nodes, not just a fixed-size window.
+
+            for (std::size_t candidate = 0;
+                 candidate < count; ++candidate)
+            {
+                if (!scheduled[candidate])
+                    {
+                        std::ostringstream instructionText;
+                        instructionText << basic_block[region_start + candidate];
+
+                        qDebug() << "[H_NF] Candidate:"
+                                << QString::fromStdString(instructionText.str());
+                    }
+
+                if (scheduled[candidate])
+                    continue;
+
+                bool ready = true;
+                for (std::size_t pred = 0; pred < candidate; ++pred)
+                {
+                    if (edges[pred][candidate] && !scheduled[pred])
+                    {
+                        ready = false;
+                        break;
+                    }
+                }
+
+                if (!ready)
+                    continue;
+
+                // Estimate the immediate no-forwarding RAW stall penalty.
+                std::size_t stalls = 0;
+
+                if (!scheduled_info.empty() &&
+                    hasRAWDependency(scheduled_info.back(),
+                                     nodes[candidate]))
+                {
+                    stalls = 2;
+                }
+                else if (scheduled_info.size() >= 2 &&
+                         hasRAWDependency(
+                             scheduled_info[scheduled_info.size() - 2],
+                             nodes[candidate]))
+                {
+                    stalls = 1;
+                }
+
+                if (!scheduled[candidate])
+                    {
+                        std::ostringstream instructionText;
+                        instructionText << basic_block[region_start + candidate];
+
+                        qDebug() << "[H_NF] Candidate:"
+                                << QString::fromStdString(instructionText.str())
+                                << "Stalls:" << stalls
+                                << "Critical path:" << critical_path[candidate];
+                    }
+
+                if (best == count ||
+                    stalls < best_stalls ||
+                    (stalls == best_stalls &&
+                     critical_path[candidate] > best_path) ||
+                    (stalls == best_stalls &&
+                     critical_path[candidate] == best_path &&
+                     candidate < best))
+                {
+                    best = candidate;
+                    best_stalls = stalls;
+                    best_path = critical_path[candidate];
+                }
+            }
+
+            // The graph is acyclic because all edges point forward in the
+            // original instruction order. This guard protects against bugs.
+            if (best == count)
+                break;
+
+            scheduled[best] = true;
+            order.push_back(best);
+            scheduled_info.push_back(nodes[best]);
+        }
+
+        // Reorder only if the scheduler produced a complete valid ordering.
+        if (order.size() == count)
+        {
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                result.instructions[region_start + i] =
+                    basic_block[region_start + order[i]];
+
+                if (order[i] != i)
+                    ++result.moved_instructions;
+            }
+        }
+
+        region_start = region_end;
     }
 
     updateIndicesIfMoved(result, basic_block);
@@ -192,8 +339,7 @@ ScheduleResult scheduleBasicBlock(const std::vector<ICUnit> &basic_block,
 }
 
 ScheduleResult scheduleProgramBlocks(const std::vector<ICUnit> &program,
-                                     const std::vector<std::size_t> &branch_target_indices,
-                                     std::size_t window_size)
+                                     const std::vector<std::size_t> &branch_target_indices)
 {
     ScheduleResult result;
     result.instructions = program;
@@ -215,7 +361,7 @@ ScheduleResult scheduleProgramBlocks(const std::vector<ICUnit> &program,
         {
             std::vector<ICUnit> block(program.begin() + static_cast<std::ptrdiff_t>(block_start),
                                       program.begin() + static_cast<std::ptrdiff_t>(i));
-            auto block_result = scheduleBasicBlock(block, window_size);
+            auto block_result = scheduleBasicBlock(block);
             result.moved_instructions += block_result.moved_instructions;
             scheduled.insert(scheduled.end(), block_result.instructions.begin(),
                              block_result.instructions.end());
@@ -228,76 +374,10 @@ ScheduleResult scheduleProgramBlocks(const std::vector<ICUnit> &program,
 }
 
 ScheduleResult scheduleLoadUseHazards(
-    const std::vector<ICUnit> &basic_block,
-    std::size_t window_size)
+    const std::vector<ICUnit> &basic_block)
 {
-    return scheduleBasicBlock(basic_block, window_size);
+    return scheduleBasicBlock(basic_block);
 }
 
-/*
-ScheduleResult scheduleLoadUseHazards(const std::vector<ICUnit> &basic_block,
-                                      std::size_t window_size)
-{
-    // Keep the Phase 1 API focused on load-use hazards. General RAW scheduling
-    // remains available through scheduleBasicBlock().
-    ScheduleResult result;
-    result.instructions = basic_block;
-    if (basic_block.size() < 3 || window_size < 3)
-        return result;
-
-    for (std::size_t load_index = 0;
-         load_index + 2 < result.instructions.size(); ++load_index)
-    {
-        const InstructionInfo load_info = describe(result.instructions[load_index]);
-        if (!load_info.supported || !load_info.is_load || load_info.writes.empty())
-            continue;
-
-        const std::string loaded_register = load_info.writes.front();
-        const InstructionInfo consumer_info = describe(result.instructions[load_index + 1]);
-        if (!consumer_info.supported ||
-            !intersects(load_info.writes, consumer_info.reads))
-            continue;
-
-        const std::size_t remaining = result.instructions.size() - load_index;
-        const std::size_t end = load_index + std::min(window_size, remaining);
-        for (std::size_t candidate_index = load_index + 2;
-             candidate_index < end; ++candidate_index)
-        {
-            const InstructionInfo candidate_info = describe(result.instructions[candidate_index]);
-            if (!candidate_info.supported || candidate_info.is_memory() ||
-                std::find(candidate_info.reads.begin(), candidate_info.reads.end(), loaded_register)
-                    != candidate_info.reads.end() ||
-                std::find(candidate_info.writes.begin(), candidate_info.writes.end(), loaded_register)
-                    != candidate_info.writes.end())
-                continue;
-
-            bool safe = true;
-            for (std::size_t crossed_index = load_index + 1;
-                 crossed_index < candidate_index; ++crossed_index)
-            {
-                if (!canCross(candidate_info, describe(result.instructions[crossed_index])))
-                {
-                    safe = false;
-                    break;
-                }
-            }
-            if (!safe)
-                continue;
-
-            ICUnit moving = result.instructions[candidate_index];
-            result.instructions.erase(result.instructions.begin() +
-                                      static_cast<std::ptrdiff_t>(candidate_index));
-            result.instructions.insert(result.instructions.begin() +
-                                           static_cast<std::ptrdiff_t>(load_index + 1),
-                                       moving);
-            ++result.moved_instructions;
-            break; // one filler per load-use dependency
-        }
-    }
-
-    updateIndicesIfMoved(result, basic_block);
-    return result;
-}
-*/
 
 } // namespace Kites::optimizer

@@ -1,3 +1,4 @@
+
 /**
  * @file instruction_scheduler.h
  * @brief Conservative dependency-aware scheduling within control-flow basic blocks.
@@ -9,7 +10,6 @@
 #include <vector>
 
 #include "assembler/code_generator.h"
-#include "optimizer/scheduler_config.h"
 
 namespace Kites::optimizer
 {
@@ -20,29 +20,23 @@ struct ScheduleResult
 };
 
 /**
- * Schedules a single basic block, never moving instructions across an
- * unsupported operation or a memory operation. The block must not contain
- * an interior branch/jump or instructions from another block.
+ * Schedules a single basic block using dependency-aware instruction scheduling.
+ * Instructions are never moved across unsupported operations or memory barriers.
  */
 ScheduleResult scheduleBasicBlock(
-    const std::vector<ICUnit> &basic_block,
-    std::size_t window_size = g_scheduler_window_size);
+    const std::vector<ICUnit> &basic_block);
 
 /**
- * Splits a program at control-flow boundaries and at known branch-target
- * instruction indices, then schedules each block independently. Target
- * indices are zero-based instruction indices, not byte addresses.
- * Control-flow instructions remain at the end of their original block.
+ * Splits a program at control-flow boundaries and branch-target indices,
+ * then schedules each block independently.
  */
 ScheduleResult scheduleProgramBlocks(
     const std::vector<ICUnit> &program,
-    const std::vector<std::size_t> &branch_target_indices,
-    std::size_t window_size = g_scheduler_window_size);
+    const std::vector<std::size_t> &branch_target_indices);
 
-/** Backwards-compatible name retained for callers from Phase 1. */
+/** Backwards-compatible name retained for Phase 1 callers. */
 ScheduleResult scheduleLoadUseHazards(
-    const std::vector<ICUnit> &basic_block,
-    std::size_t window_size = g_scheduler_window_size);
+    const std::vector<ICUnit> &basic_block);
 
 } // namespace Kites::optimizer
 

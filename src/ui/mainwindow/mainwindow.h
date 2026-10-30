@@ -76,7 +76,6 @@ private:
 
     std::optional<AssembledProgram> m_benchmarkOriginalProgram;
     std::optional<AssembledProgram> m_benchmarkOptimizedProgram;
-    int m_benchmarkWindowSize = 0;
 
     void startBenchmarkOriginalRun();
     void startBenchmarkOptimizedRun();
