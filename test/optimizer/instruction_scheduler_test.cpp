@@ -141,3 +141,16 @@ TEST(InstructionSchedulerTest, KeepsBranchInPlace)
     ASSERT_EQ(result.instructions.size(), program.size());
     EXPECT_EQ(result.instructions[1].getOpcode(), "beq");
 }
+
+TEST(InstructionSchedulerTest, BranchInstructionIsASchedulingBarrier)
+{
+    const std::vector<ICUnit> block = {
+        makeInstruction(0, "lw", "x1", "x2"),
+        makeInstruction(1, "add", "x3", "x1", "x4"),
+        makeInstruction(2, "beq", "", "x5", "x6"),
+        makeInstruction(3, "addi", "x7", "x8")};
+
+    const auto result = scheduleBasicBlock(block);
+    ASSERT_EQ(result.instructions.size(), block.size());
+    EXPECT_EQ(result.instructions[2].getOpcode(), "beq");
+}
