@@ -20,7 +20,7 @@ TEST(ForwardingSchedulerTest, DoesNotReorderOrdinaryAluRawHazards)
         makeFwdInstruction(0,"addi","x1","x0"),
         makeFwdInstruction(1,"add","x2","x1","x4"),
         makeFwdInstruction(2,"addi","x5","x0")};
-    const auto result=scheduleForwardingBasicBlock(block,3);
+    const auto result=scheduleForwardingBasicBlock(block);
     EXPECT_EQ(result.moved_instructions,0u);
     EXPECT_EQ(result.instructions[1].getOpcode(),"add");
 }
@@ -31,7 +31,7 @@ TEST(ForwardingSchedulerTest, FillsLoadUseGapWithIndependentInstruction)
         makeFwdInstruction(10,"lw","x1","x2"),
         makeFwdInstruction(11,"add","x3","x1","x4"),
         makeFwdInstruction(12,"addi","x5","x6")};
-    const auto result=scheduleForwardingBasicBlock(block,3);
+    const auto result=scheduleForwardingBasicBlock(block);
     ASSERT_EQ(result.instructions.size(),3u);
     EXPECT_EQ(result.moved_instructions,1u);
     EXPECT_EQ(result.instructions[1].getOpcode(),"addi");
@@ -44,5 +44,5 @@ TEST(ForwardingSchedulerTest, DoesNotMoveCandidateThatClobbersConsumerInput)
         makeFwdInstruction(0,"lw","x1","x2"),
         makeFwdInstruction(1,"add","x3","x1","x4"),
         makeFwdInstruction(2,"addi","x1","x6")};
-    EXPECT_EQ(scheduleForwardingBasicBlock(block,3).moved_instructions,0u);
+    EXPECT_EQ(scheduleForwardingBasicBlock(block).moved_instructions,0u);
 }

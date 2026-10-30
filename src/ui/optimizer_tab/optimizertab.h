@@ -36,13 +36,9 @@ public:
         std::function<void(const AssembledProgram &)> handler);
 
     void setBenchmarkHandler(
-        std::function<void(
-            const AssembledProgram &,
-            const AssembledProgram &,
-            int)> handler);
-
+        std::function<void(const AssembledProgram &, const AssembledProgram &, bool)> handler);
+    
     void showBenchmarkResults(
-        int windowSize,
         const OptimizerBenchmarkMetrics &original,
         const OptimizerBenchmarkMetrics &optimized);
 
@@ -52,9 +48,7 @@ private:
     void benchmarkOptimizedProgram();
 
     EditorTab *m_editor = nullptr;
-    QSpinBox *m_windowSizeSpinBox = nullptr;
     QComboBox *m_hazardModelComboBox = nullptr;
-    int m_optimizedWindowSize = 4;
     QLabel *m_statusLabel = nullptr;
     QPlainTextEdit *m_originalOutput = nullptr;
     QPlainTextEdit *m_optimizedOutput = nullptr;
@@ -65,13 +59,14 @@ private:
 
     std::optional<AssembledProgram> m_originalProgram;
     std::optional<AssembledProgram> m_optimizedProgram;
+    bool m_optimizedWithForwarding = false;
 
     std::function<void(const AssembledProgram &)> m_loadHandler;
 
     std::function<void(
         const AssembledProgram &,
         const AssembledProgram &,
-        int)> m_benchmarkHandler;
+        bool)> m_benchmarkHandler;
 };
 
 } // namespace Kites
