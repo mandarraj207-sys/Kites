@@ -336,9 +336,13 @@ void OptimizerTab::optimizeCurrentSource()
             m_hazardModelComboBox->currentData().toBool();
 
         const std::unordered_set<std::string> controlFlowOpcodes = {
+            // Conditional branches.
             "beq", "bne", "blt", "bge", "bltu", "bgeu",
-            "jal", "jalr", "c.beqz", "c.bnez", "c.j", "c.jal",
-            "c.jr", "c.jalr", "ecall", "ebreak", "mret", "sret"
+            "c.beqz", "c.bnez",
+            // Direct and indirect jumps (including compressed forms).
+            "jal", "jalr", "j", "jr", "c.j", "c.jal", "c.jr", "c.jalr",
+            // Traps/returns also terminate a straight-line scheduling region.
+            "ecall", "ebreak", "c.ebreak", "mret", "sret", "uret", "dret"
         };
 
         const auto isControlFlow = [&](const ICUnit &instruction) {

@@ -31,8 +31,9 @@ const std::unordered_set<std::string> kIType = {
     "srai", "addiw", "slliw", "srliw", "sraiw"};
 
 const std::unordered_set<std::string> kControl = {
-    "beq", "bne", "blt", "bge", "bltu", "bgeu", "jal", "jalr",
-    "c.j", "c.jr", "ecall", "ebreak", "mret", "sret"};
+    "beq", "bne", "blt", "bge", "bltu", "bgeu", "c.beqz", "c.bnez",
+    "jal", "jalr", "j", "jr", "c.j", "c.jal", "c.jr", "c.jalr",
+    "ecall", "ebreak", "c.ebreak", "mret", "sret", "uret", "dret"};
 
 struct Info
 {

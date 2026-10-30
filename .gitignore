@@ -25,3 +25,21 @@ gtest_filter.
 gtest_filter.py/build-phase1/
 /build/
 /build-phase1/
+
+# Build files
+build/
+cmake-build-*/
+
+# Compiled files
+*.o
+*.a
+*.so
+*.out
+
+# IDE files
+.idea/
+.vscode/
+
+# Temporary files
+*.tmp
+*.log

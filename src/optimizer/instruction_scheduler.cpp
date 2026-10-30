@@ -39,8 +39,9 @@ const std::unordered_set<std::string> kITypeInteger = {
 const std::unordered_set<std::string> kLoads = {"lb", "lh", "lw", "ld", "lbu", "lhu", "lwu"};
 const std::unordered_set<std::string> kStores = {"sb", "sh", "sw", "sd"};
 const std::unordered_set<std::string> kControlFlow = {
-    "beq", "bne", "blt", "bge", "bltu", "bgeu", "jal", "jalr", "c.j", "c.jr",
-    "ecall", "ebreak", "mret", "sret"};
+    "beq", "bne", "blt", "bge", "bltu", "bgeu", "c.beqz", "c.bnez",
+    "jal", "jalr", "j", "jr", "c.j", "c.jal", "c.jr", "c.jalr",
+    "ecall", "ebreak", "c.ebreak", "mret", "sret", "uret", "dret"};
 
 bool contains(const std::unordered_set<std::string> &set, const std::string &value)
 {
