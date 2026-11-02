@@ -1,0 +1,176 @@
+--- a/src/optimizer/forwarding_instruction_scheduler.cpp
++++ b/src/optimizer/forwarding_instruction_scheduler.cpp
+@@ -69,9 +69,9 @@
+     Info i;
+     const auto op = u.getOpcode();
+ 
+-    if (!u.getLabel().empty())
+-        return i;
+-
++    // For a branch, getLabel() is its TARGET label (for example, "inner"),
++    // not a label attached to this instruction. Recognize branches before
++    // applying the non-branch label/relocation barrier below.
+     if (has(kConditionalBranches, op))
+     {
+         i.ok = true;
+@@ -79,6 +79,9 @@
+         readReg(i, u.getRs2());
+         return i;
+     }
++
++    if (!u.getLabel().empty())
++        return i;
+     if (has(kControl, op))
+         return i;
+ 
+--- a/src/optimizer/instruction_scheduler.cpp
++++ b/src/optimizer/instruction_scheduler.cpp
+@@ -66,12 +66,9 @@
+     const std::string rs1 = unit.getRs1();
+     const std::string rs2 = unit.getRs2();
+ 
+-    // Labels on ICUnits represent control-flow targets/references in the
+-    // assembler's intermediate form. Keep such instructions immovable.
+-    if (!unit.getLabel().empty()) return info;
+-
+-    // Conditional branches are supported as fixed terminal nodes. Their
+-    // source operands participate in RAW/WAR/WAW dependency analysis.
++    // For a branch, getLabel() is its TARGET label (for example, "inner"),
++    // not a label attached to this instruction. Recognize branches before
++    // applying the non-branch label/relocation barrier below.
+     if (contains(kConditionalBranches, op))
+     {
+         info.supported = true;
+@@ -79,6 +76,8 @@
+         addRead(info.reads, rs2);
+         return info;
+     }
++
++    if (!unit.getLabel().empty()) return info;
+     if (contains(kControlFlow, op)) return info;
+ 
+     if (contains(kRTypeInteger, op))
+@@ -257,6 +256,7 @@
+             std::size_t best = count;
+             std::size_t best_stalls =
+                 std::numeric_limits<std::size_t>::max();
++            std::size_t best_branch_priority = 0;
+             std::size_t best_path = 0;
+ 
+             // Consider ALL ready nodes, not just a fixed-size window.
+@@ -306,6 +306,24 @@
+                     stalls = 1;
+                 }
+ 
++                // A producer of a branch operand should be scheduled early,
++                // leaving independent instructions between it and the fixed
++                // branch. The branch has edges from every earlier node, so
++                // ordinary critical-path length alone cannot distinguish
++                // its operand producers from unrelated instructions.
++                std::size_t branchPriority = 0;
++                for (std::size_t consumer = candidate + 1;
++                     consumer < count; ++consumer)
++                {
++                    if (!scheduled[consumer] &&
++                        contains(kConditionalBranches,
++                                 basic_block[region_start + consumer].getOpcode()) &&
++                        hasRAWDependency(nodes[candidate], nodes[consumer]))
++                    {
++                        ++branchPriority;
++                    }
++                }
++
+                 if (!scheduled[candidate])
+                     {
+                         std::ostringstream instructionText;
+@@ -314,19 +332,25 @@
+                         qDebug() << "[H_NF] Candidate:"
+                                 << QString::fromStdString(instructionText.str())
+                                 << "Stalls:" << stalls
++                                << "Branch priority:" << branchPriority
+                                 << "Critical path:" << critical_path[candidate];
+                     }
+ 
+                 if (best == count ||
+                     stalls < best_stalls ||
+                     (stalls == best_stalls &&
++                     branchPriority > best_branch_priority) ||
++                    (stalls == best_stalls &&
++                     branchPriority == best_branch_priority &&
+                      critical_path[candidate] > best_path) ||
+                     (stalls == best_stalls &&
++                     branchPriority == best_branch_priority &&
+                      critical_path[candidate] == best_path &&
+                      candidate < best))
+                 {
+                     best = candidate;
+                     best_stalls = stalls;
++                    best_branch_priority = branchPriority;
+                     best_path = critical_path[candidate];
+                 }
+             }
+--- a/test/optimizer/forwarding_instruction_scheduler_test.cpp
++++ b/test/optimizer/forwarding_instruction_scheduler_test.cpp
+@@ -89,6 +89,9 @@
+         makeFwdInstruction(2, "addi", "x7", "x0"),
+         makeFwdInstruction(3, "beq", "", "x5", "x6")};
+ 
++    // In the assembler IR, a branch's label field stores its TARGET.
++    block.back().setLabel("target");
++
+     const auto result = scheduleForwardingBasicBlock(block);
+     ASSERT_EQ(result.instructions.size(), block.size());
+     EXPECT_EQ(result.instructions.back().getOpcode(), "beq");
+--- a/test/optimizer/instruction_scheduler_test.cpp
++++ b/test/optimizer/instruction_scheduler_test.cpp
+@@ -154,3 +154,50 @@
+     ASSERT_EQ(result.instructions.size(), block.size());
+     EXPECT_EQ(result.instructions[2].getOpcode(), "beq");
+ }
++
++
++TEST(InstructionSchedulerTest, SchedulesBranchOperandProducerEarlyWithoutForwarding)
++{
++    // The final branch reads x26. Its producer starts after two independent
++    // instructions and should be moved earlier to leave useful instructions
++    // between the producer and the branch.
++    std::vector<ICUnit> block = {
++        makeInstruction(0, "sub", "x10", "x11", "x12"),
++        makeInstruction(1, "xor", "x13", "x14", "x15"),
++        makeInstruction(2, "addi", "x26", "x25"),
++        makeInstruction(3, "bne", "", "x26", "x0")};
++    block.back().setLabel("inner"); // Branch target, not an attached code label.
++
++    const auto result = scheduleBasicBlock(block);
++    ASSERT_EQ(result.instructions.size(), block.size());
++    EXPECT_EQ(result.instructions[0].getOpcode(), "addi");
++    EXPECT_EQ(result.instructions[1].getOpcode(), "sub");
++    EXPECT_EQ(result.instructions[2].getOpcode(), "xor");
++    EXPECT_EQ(result.instructions[3].getOpcode(), "bne");
++    EXPECT_EQ(result.instructions[3].getLabel(), "inner");
++    EXPECT_GT(result.moved_instructions, 0u);
++}
++
++TEST(InstructionSchedulerTest, PrioritizesBothBranchOperandProducers)
++{
++    std::vector<ICUnit> block = {
++        makeInstruction(0, "sub", "x10", "x11", "x12"),
++        makeInstruction(1, "addi", "x5", "x1"),
++        makeInstruction(2, "xor", "x13", "x14", "x15"),
++        makeInstruction(3, "addi", "x6", "x2"),
++        makeInstruction(4, "beq", "", "x5", "x6")};
++    block.back().setLabel("target");
++
++    const auto result = scheduleBasicBlock(block);
++    ASSERT_EQ(result.instructions.size(), block.size());
++    EXPECT_EQ(result.instructions.back().getOpcode(), "beq");
++
++    auto positionOf = [&](const std::string &rd) {
++        for (std::size_t i = 0; i < result.instructions.size(); ++i)
++            if (result.instructions[i].getRd() == rd) return i;
++        return result.instructions.size();
++    };
++    EXPECT_LT(positionOf("x5"), 4u);
++    EXPECT_LT(positionOf("x6"), 4u);
++    EXPECT_GT(result.moved_instructions, 0u);
++}

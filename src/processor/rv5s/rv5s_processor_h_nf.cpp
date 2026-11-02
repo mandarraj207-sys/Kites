@@ -304,6 +304,11 @@ void RV5StageProcessorHNF::pipeline_execute()
             break;
         }
 
+        std::cout << "[Benchmark] Conditional branch at PC 0x"
+                  << std::hex << id_ex_reg_.pc << std::dec
+                  << (condition_met ? " : TAKEN" : " : NOT TAKEN")
+                  << std::endl;
+
         if (condition_met)
         {
             ex_mem_reg_.branch_taken = true;

@@ -411,9 +411,21 @@ void OptimizerTab::optimizeCurrentSource()
             // Control-flow instructions must remain fixed.
             if (isControlFlow(instructions[i]))
             {
-                scheduleRegion(regionStart, i);
-
-                result.instructions.push_back(instructions[i]);
+                // Keep conditional branches inside the scheduling block as
+                // its fixed final node. This lets the scheduler model both
+                // branch operands as consumers without moving the branch.
+                const std::string opcode = instructions[i].getOpcode();
+                const bool conditionalBranch =
+                    opcode == "beq" || opcode == "bne" || opcode == "blt" ||
+                    opcode == "bge" || opcode == "bltu" || opcode == "bgeu" ||
+                    opcode == "c.beqz" || opcode == "c.bnez";
+                if (conditionalBranch)
+                    scheduleRegion(regionStart, i + 1);
+                else
+                {
+                    scheduleRegion(regionStart, i);
+                    result.instructions.push_back(instructions[i]);
+                }
                 regionStart = i + 1;
             }
         }
@@ -784,7 +796,7 @@ void OptimizerTab::showBenchmarkResults(const OptimizerBenchmarkMetrics &origina
     table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     table->setMinimumHeight(175);
 
-    const QStringList names = {"Cycles", "Stall cycles", "Instructions retired", "CPI"};
+    const QStringList names = {"Cycles", "Stall cycles", "Executed instructions", "CPI"};
     const QStringList originalValues = {
         QString::number(original.cycles), QString::number(original.stalls),
         QString::number(original.instructionsRetired), QString::number(original.cpi, 'f', 3)};

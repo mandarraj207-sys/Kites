@@ -79,6 +79,7 @@ private:
 
     void startBenchmarkOriginalRun();
     void startBenchmarkOptimizedRun();
+    void initializeBenchmarkRegisters();
     void captureBenchmarkMetrics(PerformanceMetrics &metrics);
 
     // Existing MainWindow methods
