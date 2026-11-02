@@ -30,6 +30,8 @@ const std::unordered_set<std::string> kIType = {
     "addi", "slti", "sltiu", "xori", "ori", "andi", "slli", "srli",
     "srai", "addiw", "slliw", "srliw", "sraiw"};
 
+const std::unordered_set<std::string> kConditionalBranches = {
+    "beq", "bne", "blt", "bge", "bltu", "bgeu", "c.beqz", "c.bnez"};
 const std::unordered_set<std::string> kControl = {
     "beq", "bne", "blt", "bge", "bltu", "bgeu", "c.beqz", "c.bnez",
     "jal", "jalr", "j", "jr", "c.j", "c.jal", "c.jr", "c.jalr",
@@ -67,7 +69,20 @@ Info inspect(const ICUnit& u)
     Info i;
     const auto op = u.getOpcode();
 
-    if (!u.getLabel().empty() || has(kControl, op))
+    // For a branch, getLabel() is its TARGET label (for example, "inner"),
+    // not a label attached to this instruction. Recognize branches before
+    // applying the non-branch label/relocation barrier below.
+    if (has(kConditionalBranches, op))
+    {
+        i.ok = true;
+        readReg(i, u.getRs1());
+        readReg(i, u.getRs2());
+        return i;
+    }
+
+    if (!u.getLabel().empty())
+        return i;
+    if (has(kControl, op))
         return i;
 
     if (has(kRType, op))
@@ -182,6 +197,10 @@ ScheduleResult scheduleForwardingBasicBlock(
                 break;
 
             ++regionEnd;
+            // A conditional branch terminates this scheduling region but is
+            // included as its fixed final instruction.
+            if (has(kConditionalBranches, block[regionEnd - 1].getOpcode()))
+                break;
         }
 
         const std::size_t count = regionEnd - regionStart;
@@ -211,8 +230,12 @@ ScheduleResult scheduleForwardingBasicBlock(
                 // we do not perform memory-dependence/alias analysis.
                 const bool loadOrder =
                     nodes[i].load && nodes[j].load;
+                const bool terminalBranch =
+                    j == count - 1 &&
+                    has(kConditionalBranches,
+                        block[regionStart + j].getOpcode());
                 edges[i][j] =
-                    dependency(nodes[i], nodes[j]) || loadOrder;
+                    dependency(nodes[i], nodes[j]) || loadOrder || terminalBranch;
             }
         }
 
@@ -244,6 +267,7 @@ ScheduleResult scheduleForwardingBasicBlock(
             std::size_t bestStallCost =
                 std::numeric_limits<std::size_t>::max();
             std::size_t bestCriticalPath = 0;
+            std::size_t bestLatencyFill = 0;
 
             for (std::size_t candidate = 0;
                  candidate < count; ++candidate)
@@ -269,25 +293,50 @@ ScheduleResult scheduleForwardingBasicBlock(
                 // A load followed immediately by its consumer still incurs
                 // the load-use penalty.
                 std::size_t stallCost = 0;
-
-                if (!scheduledInfo.empty() &&
-                    scheduledInfo.back().load &&
-                    rawDependency(scheduledInfo.back(), nodes[candidate]))
+                for (std::size_t prior = 0; prior < scheduledInfo.size(); ++prior)
                 {
-                    stallCost = 1;
+                    if (!rawDependency(scheduledInfo[prior], nodes[candidate]))
+                        continue;
+                    const std::size_t distance = scheduledInfo.size() - prior;
+                    const bool branchConsumer =
+                        has(kConditionalBranches,
+                            block[regionStart + candidate].getOpcode());
+                    const std::size_t requiredDistance =
+                        (scheduledInfo[prior].load || branchConsumer) ? 2 : 1;
+                    if (distance < requiredDistance)
+                        stallCost += requiredDistance - distance;
+                }
+
+                // Prefer instructions that can occupy a latency slot before
+                // an already-ready consumer, especially branch operands.
+                std::size_t latencyFill = 0;
+                for (std::size_t consumer = candidate + 1; consumer < count; ++consumer)
+                {
+                    if (scheduled[consumer] ||
+                        !rawDependency(nodes[candidate], nodes[consumer]))
+                        continue;
+                    const bool isBranch =
+                        has(kConditionalBranches, block[regionStart + consumer].getOpcode());
+                    if (isBranch || nodes[candidate].load)
+                        ++latencyFill;
                 }
 
                 if (best == count ||
                     stallCost < bestStallCost ||
                     (stallCost == bestStallCost &&
+                     latencyFill > bestLatencyFill) ||
+                    (stallCost == bestStallCost &&
+                     latencyFill == bestLatencyFill &&
                      criticalPath[candidate] > bestCriticalPath) ||
                     (stallCost == bestStallCost &&
+                     latencyFill == bestLatencyFill &&
                      criticalPath[candidate] == bestCriticalPath &&
                      candidate < best))
                 {
                     best = candidate;
                     bestStallCost = stallCost;
                     bestCriticalPath = criticalPath[candidate];
+                    bestLatencyFill = latencyFill;
                 }
             }
 

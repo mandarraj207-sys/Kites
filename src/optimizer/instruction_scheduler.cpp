@@ -38,6 +38,8 @@ const std::unordered_set<std::string> kITypeInteger = {
     "addiw", "slliw", "srliw", "sraiw"};
 const std::unordered_set<std::string> kLoads = {"lb", "lh", "lw", "ld", "lbu", "lhu", "lwu"};
 const std::unordered_set<std::string> kStores = {"sb", "sh", "sw", "sd"};
+const std::unordered_set<std::string> kConditionalBranches = {
+    "beq", "bne", "blt", "bge", "bltu", "bgeu", "c.beqz", "c.bnez"};
 const std::unordered_set<std::string> kControlFlow = {
     "beq", "bne", "blt", "bge", "bltu", "bgeu", "c.beqz", "c.bnez",
     "jal", "jalr", "j", "jr", "c.j", "c.jal", "c.jr", "c.jalr",
@@ -64,9 +66,19 @@ InstructionInfo describe(const ICUnit &unit)
     const std::string rs1 = unit.getRs1();
     const std::string rs2 = unit.getRs2();
 
-    // Labels on ICUnits represent control-flow targets/references in the
-    // assembler's intermediate form. Keep such instructions immovable.
-    if (!unit.getLabel().empty() || contains(kControlFlow, op)) return info;
+    // For a branch, getLabel() is its TARGET label (for example, "inner"),
+    // not a label attached to this instruction. Recognize branches before
+    // applying the non-branch label/relocation barrier below.
+    if (contains(kConditionalBranches, op))
+    {
+        info.supported = true;
+        addRead(info.reads, rs1);
+        addRead(info.reads, rs2);
+        return info;
+    }
+
+    if (!unit.getLabel().empty()) return info;
+    if (contains(kControlFlow, op)) return info;
 
     if (contains(kRTypeInteger, op))
     {
@@ -178,6 +190,11 @@ ScheduleResult scheduleBasicBlock(
                 break;
 
             ++region_end;
+            // Include a conditional branch as the fixed final node of this
+            // region; schedule following instructions independently.
+            if (contains(kConditionalBranches,
+                         basic_block[region_end - 1].getOpcode()))
+                break;
         }
 
         const std::size_t count = region_end - region_start;
@@ -204,8 +221,12 @@ ScheduleResult scheduleBasicBlock(
                 // we do not perform memory-dependence/alias analysis.
                 const bool loadOrder =
                     nodes[i].is_load && nodes[j].is_load;
+                const bool terminalBranch =
+                    j == count - 1 &&
+                    contains(kConditionalBranches,
+                             basic_block[region_start + j].getOpcode());
                 edges[i][j] =
-                    hasDependency(nodes[i], nodes[j]) || loadOrder;
+                    hasDependency(nodes[i], nodes[j]) || loadOrder || terminalBranch;
             }
         }
 
@@ -235,6 +256,7 @@ ScheduleResult scheduleBasicBlock(
             std::size_t best = count;
             std::size_t best_stalls =
                 std::numeric_limits<std::size_t>::max();
+            std::size_t best_branch_priority = 0;
             std::size_t best_path = 0;
 
             // Consider ALL ready nodes, not just a fixed-size window.
@@ -284,6 +306,24 @@ ScheduleResult scheduleBasicBlock(
                     stalls = 1;
                 }
 
+                // A producer of a branch operand should be scheduled early,
+                // leaving independent instructions between it and the fixed
+                // branch. The branch has edges from every earlier node, so
+                // ordinary critical-path length alone cannot distinguish
+                // its operand producers from unrelated instructions.
+                std::size_t branchPriority = 0;
+                for (std::size_t consumer = candidate + 1;
+                     consumer < count; ++consumer)
+                {
+                    if (!scheduled[consumer] &&
+                        contains(kConditionalBranches,
+                                 basic_block[region_start + consumer].getOpcode()) &&
+                        hasRAWDependency(nodes[candidate], nodes[consumer]))
+                    {
+                        ++branchPriority;
+                    }
+                }
+
                 if (!scheduled[candidate])
                     {
                         std::ostringstream instructionText;
@@ -292,19 +332,25 @@ ScheduleResult scheduleBasicBlock(
                         qDebug() << "[H_NF] Candidate:"
                                 << QString::fromStdString(instructionText.str())
                                 << "Stalls:" << stalls
+                                << "Branch priority:" << branchPriority
                                 << "Critical path:" << critical_path[candidate];
                     }
 
                 if (best == count ||
                     stalls < best_stalls ||
                     (stalls == best_stalls &&
+                     branchPriority > best_branch_priority) ||
+                    (stalls == best_stalls &&
+                     branchPriority == best_branch_priority &&
                      critical_path[candidate] > best_path) ||
                     (stalls == best_stalls &&
+                     branchPriority == best_branch_priority &&
                      critical_path[candidate] == best_path &&
                      candidate < best))
                 {
                     best = candidate;
                     best_stalls = stalls;
+                    best_branch_priority = branchPriority;
                     best_path = critical_path[candidate];
                 }
             }

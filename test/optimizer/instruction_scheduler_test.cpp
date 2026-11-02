@@ -154,3 +154,50 @@ TEST(InstructionSchedulerTest, BranchInstructionIsASchedulingBarrier)
     ASSERT_EQ(result.instructions.size(), block.size());
     EXPECT_EQ(result.instructions[2].getOpcode(), "beq");
 }
+
+
+TEST(InstructionSchedulerTest, SchedulesBranchOperandProducerEarlyWithoutForwarding)
+{
+    // The final branch reads x26. Its producer starts after two independent
+    // instructions and should be moved earlier to leave useful instructions
+    // between the producer and the branch.
+    std::vector<ICUnit> block = {
+        makeInstruction(0, "sub", "x10", "x11", "x12"),
+        makeInstruction(1, "xor", "x13", "x14", "x15"),
+        makeInstruction(2, "addi", "x26", "x25"),
+        makeInstruction(3, "bne", "", "x26", "x0")};
+    block.back().setLabel("inner"); // Branch target, not an attached code label.
+
+    const auto result = scheduleBasicBlock(block);
+    ASSERT_EQ(result.instructions.size(), block.size());
+    EXPECT_EQ(result.instructions[0].getOpcode(), "addi");
+    EXPECT_EQ(result.instructions[1].getOpcode(), "sub");
+    EXPECT_EQ(result.instructions[2].getOpcode(), "xor");
+    EXPECT_EQ(result.instructions[3].getOpcode(), "bne");
+    EXPECT_EQ(result.instructions[3].getLabel(), "inner");
+    EXPECT_GT(result.moved_instructions, 0u);
+}
+
+TEST(InstructionSchedulerTest, PrioritizesBothBranchOperandProducers)
+{
+    std::vector<ICUnit> block = {
+        makeInstruction(0, "sub", "x10", "x11", "x12"),
+        makeInstruction(1, "addi", "x5", "x1"),
+        makeInstruction(2, "xor", "x13", "x14", "x15"),
+        makeInstruction(3, "addi", "x6", "x2"),
+        makeInstruction(4, "beq", "", "x5", "x6")};
+    block.back().setLabel("target");
+
+    const auto result = scheduleBasicBlock(block);
+    ASSERT_EQ(result.instructions.size(), block.size());
+    EXPECT_EQ(result.instructions.back().getOpcode(), "beq");
+
+    auto positionOf = [&](const std::string &rd) {
+        for (std::size_t i = 0; i < result.instructions.size(); ++i)
+            if (result.instructions[i].getRd() == rd) return i;
+        return result.instructions.size();
+    };
+    EXPECT_LT(positionOf("x5"), 4u);
+    EXPECT_LT(positionOf("x6"), 4u);
+    EXPECT_GT(result.moved_instructions, 0u);
+}

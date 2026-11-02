@@ -79,3 +79,29 @@ TEST(ForwardingSchedulerTest, CompressedBranchIsAlsoABarrier)
     ASSERT_EQ(result.instructions.size(), block.size());
     EXPECT_EQ(result.instructions[2].getOpcode(), "c.beqz");
 }
+
+
+TEST(ForwardingSchedulerTest, BranchReadsBothOperandsAndRemainsLast)
+{
+    const std::vector<ICUnit> block = {
+        makeFwdInstruction(0, "addi", "x5", "x0"),
+        makeFwdInstruction(1, "addi", "x6", "x0"),
+        makeFwdInstruction(2, "addi", "x7", "x0"),
+        makeFwdInstruction(3, "beq", "", "x5", "x6")};
+
+    // In the assembler IR, a branch's label field stores its TARGET.
+    block.back().setLabel("target");
+
+    const auto result = scheduleForwardingBasicBlock(block);
+    ASSERT_EQ(result.instructions.size(), block.size());
+    EXPECT_EQ(result.instructions.back().getOpcode(), "beq");
+    // Both branch source registers must be produced before the branch.
+    auto producerPosition = [&](const std::string &reg) {
+        for (std::size_t i = 0; i < result.instructions.size(); ++i)
+            if (result.instructions[i].getRd() == reg)
+                return i;
+        return result.instructions.size();
+    };
+    EXPECT_LT(producerPosition("x5"), result.instructions.size() - 1);
+    EXPECT_LT(producerPosition("x6"), result.instructions.size() - 1);
+}

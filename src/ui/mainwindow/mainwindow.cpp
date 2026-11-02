@@ -606,6 +606,7 @@ void MainWindow::startBenchmarkOriginalRun()
     m_processorManager->clearBreakpoints();
     m_processorManager->reset();
     m_processorManager->loadProgram(*m_benchmarkOriginalProgram);
+    initializeBenchmarkRegisters();
 
     emit runProcessorSignal();
 }
@@ -632,10 +633,26 @@ void MainWindow::startBenchmarkOptimizedRun()
     m_processorManager->clearBreakpoints();
     m_processorManager->reset();
     m_processorManager->loadProgram(*m_benchmarkOptimizedProgram);
+    initializeBenchmarkRegisters();
 
     qDebug() << "[Benchmark] Optimized program loaded; starting processor.";
 
     emit runProcessorSignal();
+}
+
+
+// Use identical, non-zero input values for both executions. This avoids the
+// all-zero reset state accidentally skipping useful branch paths in benchmark
+// programs that compare input registers. Programs can still override these
+// values through their own initial instructions.
+void MainWindow::initializeBenchmarkRegisters()
+{
+    auto *registers = m_processorManager->getRegisterFile();
+    if (!registers)
+        return;
+
+    for (std::size_t reg = 1; reg < 32; ++reg)
+        registers->WriteGpr(reg, (reg % 2) ? 1u : 2u);
 }
 
 // KITES Phase 1 contribution: capture each run and sequence original then optimized execution.
