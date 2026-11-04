@@ -31,6 +31,11 @@
 #include <QSyntaxHighlighter>
 #include <QTableWidget>
 #include <QTextCharFormat>
+#include <QTextBlock>
+#include <QTextFormat>
+#include <QList>
+#include <QTextCursor>
+#include <QTextEdit>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -56,7 +61,7 @@ class InstructionListingHighlighter : public QSyntaxHighlighter
     void highlightBlock(const QString &text) override
     {
         // Subtle green background makes reordered instructions stand out.
-        if (text.contains("| MOVED |"))
+        if (text.contains("MOVED"))
         {
             QTextCharFormat moved;
             moved.setBackground(QColor(40, 150, 80, 55));
@@ -101,7 +106,73 @@ class InstructionListingHighlighter : public QSyntaxHighlighter
         applyRegex(registerRegex, registerFormat);
         applyRegex(numberRegex, immediateFormat);
     }
-};
+ };
+
+// Render canonical assembly syntax instead of the ICUnit debug representation.
+// Pseudo-instructions have already been expanded before assembly, so this shows
+// the real instructions that the processor will execute.
+// Keep every listing column aligned using the fixed-pitch font configured
+// for the QPlainTextEdit widgets. Widths are minimum widths, so large line
+// numbers expand naturally instead of shifting the assembly column.
+QString listingColumn(const QString &value, int width, bool rightAligned = false)
+{
+    return QString("%1").arg(value, rightAligned ? width : -width, QChar(' '));
+}
+
+std::string formatAssemblyInstruction(const Kites::ICUnit &instruction)
+{
+    const std::string op = instruction.opcode.data();
+    const std::string rd = instruction.rd.data();
+    const std::string rs1 = instruction.rs1.data();
+    const std::string rs2 = instruction.rs2.data();
+    const std::string rs3 = instruction.rs3.data();
+    const std::string imm = instruction.imm.data();
+    const auto present = [](const std::string &value) { return !value.empty(); };
+    const auto join = [](const std::vector<std::string> &parts) {
+        std::string result;
+        for (const auto &part : parts) {
+            if (!result.empty()) result += ", ";
+            result += part;
+        }
+        return result;
+    };
+
+    if (op == "sw" || op == "sb" || op == "sh" || op == "sd" ||
+        op == "fsw" || op == "fsd")
+        return op + " " + rs2 + ", " + (present(imm) ? imm : "0") + "(" + rs1 + ")";
+
+    if (op == "lb" || op == "lh" || op == "lw" || op == "ld" ||
+        op == "lbu" || op == "lhu" || op == "lwu" || op == "flw" || op == "fld")
+        return op + " " + rd + ", " + (present(imm) ? imm : "0") + "(" + rs1 + ")";
+
+    if (op == "beq" || op == "bne" || op == "blt" || op == "bge" ||
+        op == "bltu" || op == "bgeu")
+        return op + " " + join({rs1, rs2, present(instruction.label) ? instruction.label : imm});
+
+    if (op == "jal")
+        return op + " " + join({present(rd) ? rd : "x1", present(instruction.label) ? instruction.label : imm});
+    if (op == "jalr")
+        return op + " " + rd + ", " + (present(imm) ? imm : "0") + "(" + rs1 + ")";
+
+    if (op == "lui" || op == "auipc")
+        return op + " " + join({rd, imm});
+
+    if (present(rs3))
+        return op + " " + join({rd, rs1, rs2, rs3});
+    if (present(rs2))
+        return op + " " + join({rd, rs1, rs2});
+    if (present(rs1) && present(imm))
+        return op + " " + join({rd, rs1, imm});
+    if (present(rd) && present(imm))
+        return op + " " + join({rd, imm});
+    if (present(rd) && present(rs1))
+        return op + " " + join({rd, rs1});
+    if (present(rd))
+        return op + " " + rd;
+    if (present(rs1))
+        return op + " " + rs1;
+    return op;
+}
 
 } // namespace
 
@@ -219,7 +290,8 @@ OptimizerTab::OptimizerTab(EditorTab *editor, QWidget *parent) : KitesTab(parent
             &OptimizerTab::benchmarkOptimizedProgram);
 }
 
-void OptimizerTab::setLoadHandler(std::function<void(const AssembledProgram &)> handler)
+void OptimizerTab::setLoadHandler(
+    std::function<void(const AssembledProgram &, bool)> handler)
 {
     m_loadHandler = std::move(handler);
 }
@@ -229,6 +301,26 @@ void OptimizerTab::setBenchmarkHandler(
 {
     m_benchmarkHandler = std::move(handler);
 }
+
+// ===== KITES Phase 1 contribution: keep the benchmark CPU in sync with the dropdown =====
+// m_optimizedWithForwarding records the model the current suggestions were
+// generated for. If the user has since changed the "Hazard model" dropdown,
+// those suggestions (and the CPU they would run on) are stale, so regenerate
+// them for the currently selected model instead of silently reusing the old one.
+bool OptimizerTab::ensureSuggestionsMatchSelectedModel()
+{
+    if (!m_originalProgram || !m_optimizedProgram || !m_hazardModelComboBox)
+        return m_originalProgram && m_optimizedProgram;
+
+    const bool selectedForwarding = m_hazardModelComboBox->currentData().toBool();
+    if (selectedForwarding == m_optimizedWithForwarding)
+        return true;
+
+    optimizeCurrentSource();
+    return m_originalProgram && m_optimizedProgram &&
+           m_optimizedWithForwarding == selectedForwarding;
+}
+// ===== End KITES Phase 1 contribution =====
 
 // KITES Phase 1 contribution: initiate the original-versus-optimized benchmark workflow.
 void OptimizerTab::benchmarkOptimizedProgram()
@@ -246,6 +338,9 @@ void OptimizerTab::benchmarkOptimizedProgram()
                              "The main window has not connected the benchmark handler.");
         return;
     }
+
+    if (!ensureSuggestionsMatchSelectedModel())
+        return; // regeneration failed; status label already explains why
 
     m_benchmarkHandler(*m_originalProgram, *m_optimizedProgram, m_optimizedWithForwarding);
 }
@@ -267,10 +362,13 @@ void OptimizerTab::loadOptimizedProgram()
         return;
     }
 
+    if (!ensureSuggestionsMatchSelectedModel())
+        return;
+
     qDebug() << "[Optimizer] Executing optimized program";
     qDebug() << "[Optimizer] Instruction count:" << m_optimizedProgram->intermediate_code.size();
 
-    m_loadHandler(*m_optimizedProgram);
+    m_loadHandler(*m_optimizedProgram, m_optimizedWithForwarding);
 }
 
 void OptimizerTab::optimizeCurrentSource()
@@ -285,6 +383,8 @@ void OptimizerTab::optimizeCurrentSource()
     m_benchmarkButton->setEnabled(false);
     m_originalOutput->clear();
     m_optimizedOutput->clear();
+    m_originalSourceLineBlocks.clear();
+    m_optimizedSourceLineBlocks.clear();
 
     if (!m_editor)
     {
@@ -295,8 +395,9 @@ void OptimizerTab::optimizeCurrentSource()
     try
     {
         // Expand custom pseudo-instructions before assembling the source.
-        const std::string source =
-            customPseudoManager::expandPseudoInstruction(m_editor->getRawText());
+        std::vector<int> expandedLineToOriginalLine;
+        const std::string source = customPseudoManager::expandPseudoInstruction(
+            m_editor->getRawText(), expandedLineToOriginalLine);
 
         const auto tempPath = std::filesystem::temp_directory_path() / "kites_optimizer_input.s";
 
@@ -317,6 +418,26 @@ void OptimizerTab::optimizeCurrentSource()
         // Keep a mutable copy: we will modify its instruction sequence
         // and rebuild the metadata needed by the processor.
         AssembledProgram originalProgram = Kites::assemble(tempPath.string());
+
+        // Map expanded pseudo-instruction lines back to the user's original
+        // source line. A pseudo that expands to several real instructions will
+        // therefore highlight the same editor line during execution.
+        originalProgram.line_number_instruction_number_mapping.clear();
+        originalProgram.instruction_number_line_number_mapping.clear();
+        for (std::size_t i = 0; i < originalProgram.intermediate_code.size(); ++i)
+        {
+            auto &instruction = originalProgram.intermediate_code[i].first;
+            const std::size_t expandedIndex = instruction.line_number > 0
+                ? static_cast<std::size_t>(instruction.line_number - 1)
+                : expandedLineToOriginalLine.size();
+            if (expandedIndex < expandedLineToOriginalLine.size())
+                instruction.line_number = static_cast<unsigned int>(expandedLineToOriginalLine[expandedIndex]);
+
+            originalProgram.line_number_instruction_number_mapping[instruction.line_number] =
+                static_cast<unsigned int>(i);
+            originalProgram.instruction_number_line_number_mapping[static_cast<unsigned int>(i)] =
+                instruction.line_number;
+        }
 
         AssembledProgram program = originalProgram;
 
@@ -566,45 +687,51 @@ void OptimizerTab::optimizeCurrentSource()
             originalPositionForOptimized.push_back(matchedPosition);
         }
 
-        // Render aligned columns using a fixed-width font.
-        // Original # and optimized # are listing positions (1-based).
-        // Source line preserves the source location carried by each instruction.
-        QString originalPreview = "ORG # | SRC LINE | INSTRUCTION\n"
-                                  "------+----------+----------------------------------------\n";
+        // Render true fixed-width columns. Do not mix hand-written spaces
+        // with QString's minimum-width formatting: that caused the assembly
+        // column to drift between rows and between the two listings.
+        QString originalPreview;
+        originalPreview += listingColumn("#", 4, true) + " | " +
+                           listingColumn("SOURCE LINE", 11) + " | ASSEMBLY\n";
+        originalPreview += QString(4, '-') + "-+-" + QString(11, '-') + "-+-" +
+                           QString(32, '-') + "\n";
+        m_originalSourceLineBlocks.clear();
 
         for (std::size_t i = 0; i < originalProgram.intermediate_code.size(); ++i)
         {
             const ICUnit &instruction = originalProgram.intermediate_code[i].first;
-
-            std::ostringstream instructionText;
-            instructionText << instruction;
-
-            originalPreview += QString("%1 | %2 | %3\n")
-                                   .arg(static_cast<qulonglong>(i + 1), 5)
-                                   .arg(instruction.line_number, 8)
-                                   .arg(QString::fromStdString(instructionText.str()));
+            originalPreview += listingColumn(QString::number(static_cast<qulonglong>(i + 1)), 4, true) +
+                               " | " + listingColumn(QString::number(instruction.line_number), 11, true) +
+                               " | " + QString::fromStdString(formatAssemblyInstruction(instruction)) + "\n";
+            m_originalSourceLineBlocks[static_cast<int>(instruction.line_number)].push_back(
+                static_cast<int>(i + 2)); // two header lines precede instruction rows
         }
 
-        QString optimizedPreview =
-            "OPT # | ORG # | SRC LINE | STATUS    | INSTRUCTION\n"
-            "------+-------+----------+-----------+----------------------------------------\n";
+        QString optimizedPreview;
+        optimizedPreview += listingColumn("#", 4, true) + " | " +
+                            listingColumn("ORG #", 5, true) + " | " +
+                            listingColumn("SOURCE LINE", 11) + " | " +
+                            listingColumn("STATUS", 10) + " | ASSEMBLY\n";
+        optimizedPreview += QString(4, '-') + "-+-" + QString(5, '-') + "-+-" +
+                            QString(11, '-') + "-+-" + QString(10, '-') + "-+-" +
+                            QString(32, '-') + "\n";
+        m_optimizedSourceLineBlocks.clear();
 
         for (std::size_t i = 0; i < program.intermediate_code.size(); ++i)
         {
             const ICUnit &instruction = program.intermediate_code[i].first;
 
-            std::ostringstream instructionText;
-            instructionText << instruction;
-
             const int originalPosition = originalPositionForOptimized[i];
             const bool moved = originalPosition >= 0 && originalPosition != static_cast<int>(i);
+            const QString status = moved ? "MOVED" : "UNCHANGED";
 
-            optimizedPreview += QString("%1 | %2 | %3 | %4 | %5\n")
-                                    .arg(static_cast<qulonglong>(i + 1), 5)
-                                    .arg(originalPosition >= 0 ? originalPosition + 1 : 0, 5)
-                                    .arg(instruction.line_number, 8)
-                                    .arg(moved ? "MOVED" : "UNCHANGED", -9)
-                                    .arg(QString::fromStdString(instructionText.str()));
+            optimizedPreview += listingColumn(QString::number(static_cast<qulonglong>(i + 1)), 4, true) +
+                                " | " + listingColumn(QString::number(originalPosition >= 0 ? originalPosition + 1 : 0), 5, true) +
+                                " | " + listingColumn(QString::number(instruction.line_number), 11, true) +
+                                " | " + listingColumn(status, 10) + " | " +
+                                QString::fromStdString(formatAssemblyInstruction(instruction)) + "\n";
+            m_optimizedSourceLineBlocks[static_cast<int>(instruction.line_number)].push_back(
+                static_cast<int>(i + 2));
         }
 
         m_originalOutput->setPlainText(originalPreview);
@@ -637,6 +764,41 @@ void OptimizerTab::optimizeCurrentSource()
 
         QMessageBox::warning(this, "Optimization failed", QString::fromUtf8(e.what()));
     }
+}
+
+void OptimizerTab::setExecutionHighlights(
+    const std::vector<std::pair<int, std::string>> &editorLines)
+{
+    const auto apply = [&](QPlainTextEdit *view,
+                           const std::map<int, std::vector<int>> &sourceLineBlocks)
+    {
+        QList<QTextEdit::ExtraSelection> selections;
+        for (const auto &[sourceLine, stage] : editorLines)
+        {
+            const auto found = sourceLineBlocks.find(sourceLine);
+            if (found == sourceLineBlocks.end())
+                continue;
+
+            for (const int blockNumber : found->second)
+            {
+                QTextBlock block = view->document()->findBlockByNumber(blockNumber);
+                if (!block.isValid())
+                    continue;
+
+                QTextEdit::ExtraSelection selection;
+                selection.cursor = QTextCursor(block);
+                selection.cursor.select(QTextCursor::LineUnderCursor);
+                selection.format.setBackground(QColor(235, 190, 65, 75));
+                selection.format.setProperty(QTextFormat::FullWidthSelection, true);
+                selection.format.setToolTip(QString("Pipeline stage: %1").arg(QString::fromStdString(stage)));
+                selections.push_back(selection);
+            }
+        }
+        view->setExtraSelections(selections);
+    };
+
+    apply(m_originalOutput, m_originalSourceLineBlocks);
+    apply(m_optimizedOutput, m_optimizedSourceLineBlocks);
 }
 
 void OptimizerTab::showBenchmarkResults(const OptimizerBenchmarkMetrics &original,

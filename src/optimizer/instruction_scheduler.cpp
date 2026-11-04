@@ -276,6 +276,18 @@ ScheduleResult scheduleBasicBlock(
                 if (scheduled[candidate])
                     continue;
 
+                // AUIPC is PC-relative. Pin it to its original slot, while
+                // still allowing independent instructions on either side to
+                // be exchanged when the fixed slot can be preserved.
+                const std::size_t output_slot = order.size();
+                const bool slot_is_auipc =
+                    basic_block[region_start + output_slot].getOpcode() == "auipc";
+                const bool candidate_is_auipc =
+                    basic_block[region_start + candidate].getOpcode() == "auipc";
+                if ((slot_is_auipc && candidate != output_slot) ||
+                    (!slot_is_auipc && candidate_is_auipc))
+                    continue;
+
                 bool ready = true;
                 for (std::size_t pred = 0; pred < candidate; ++pred)
                 {

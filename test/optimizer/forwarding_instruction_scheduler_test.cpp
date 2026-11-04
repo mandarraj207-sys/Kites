@@ -105,3 +105,18 @@ TEST(ForwardingSchedulerTest, BranchReadsBothOperandsAndRemainsLast)
     EXPECT_LT(producerPosition("x5"), result.instructions.size() - 1);
     EXPECT_LT(producerPosition("x6"), result.instructions.size() - 1);
 }
+
+
+TEST(ForwardingSchedulerTest, KeepsAuipcAtItsOriginalSlot)
+{
+    const std::vector<ICUnit> block = {
+        makeFwdInstruction(0, "addi", "x6", "x1"),
+        makeFwdInstruction(1, "auipc", "x5", ""),
+        makeFwdInstruction(2, "addi", "x7", "x2"),
+        makeFwdInstruction(3, "addi", "x8", "x3")};
+
+    const auto result = scheduleForwardingBasicBlock(block);
+    ASSERT_EQ(result.instructions.size(), block.size());
+    EXPECT_EQ(result.instructions[1].getOpcode(), "auipc");
+    EXPECT_EQ(result.instructions[1].getRd(), "x5");
+}

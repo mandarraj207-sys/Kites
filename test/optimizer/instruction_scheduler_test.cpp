@@ -201,3 +201,18 @@ TEST(InstructionSchedulerTest, PrioritizesBothBranchOperandProducers)
     EXPECT_LT(positionOf("x6"), 4u);
     EXPECT_GT(result.moved_instructions, 0u);
 }
+
+
+TEST(InstructionSchedulerTest, KeepsAuipcAtItsOriginalSlot)
+{
+    const std::vector<ICUnit> block = {
+        makeInstruction(0, "addi", "x6", "x1"),
+        makeInstruction(1, "auipc", "x5", ""),
+        makeInstruction(2, "addi", "x7", "x2"),
+        makeInstruction(3, "addi", "x8", "x3")};
+
+    const auto result = scheduleBasicBlock(block);
+    ASSERT_EQ(result.instructions.size(), block.size());
+    EXPECT_EQ(result.instructions[1].getOpcode(), "auipc");
+    EXPECT_EQ(result.instructions[1].getRd(), "x5");
+}

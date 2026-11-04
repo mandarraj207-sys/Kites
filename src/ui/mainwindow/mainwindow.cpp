@@ -1,9 +1,12 @@
 #include <array>
 #include <cstdint>
+#include <string>
+#include <unordered_set>
 #include "mainwindow.h"
 #include "assembler/assembler.h"
 #include "common/assembled_program.h"
 #include "common/globals.h"
+#include "config/config.h"
 #include "custom_pseudo_manager/custom_pseudo_manager.h"
 #include "processor/processor_manager.h"
 #include "ui/cache_tab/cachetab.h"
@@ -122,6 +125,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
                 if (editorTab)
                 {
                     editorTab->highlightLines(editorLines, disassemblyLines);
+                }
+                auto *optimizerTab = dynamic_cast<OptimizerTab *>(
+                    m_tabs[TabIndex::OptimizerTabIndex]);
+                if (optimizerTab)
+                {
+                    optimizerTab->setExecutionHighlights(editorLines);
                 }
             });
     connect(&ThemeManager::getInstance(), &ThemeManager::themeChangedSignal,
@@ -432,8 +441,13 @@ void MainWindow::setUpTabs()
         dynamic_cast<OptimizerTab *>(m_tabs[TabIndex::OptimizerTabIndex]);
 
     optimizerTab->setLoadHandler(
-        [this](const AssembledProgram &optimizedProgram)
+        [this](const AssembledProgram &optimizedProgram, bool withForwarding)
         {
+            // Execute using the same CPU model selected for instruction scheduling.
+            processorChanged(withForwarding
+                ? ProcessorType::RV5Stage_H_F
+                : ProcessorType::RV5Stage_H_NF);
+
             m_processorManager->reset();
             m_processorManager->loadProgram(optimizedProgram);
             emit runProcessorSignal();
@@ -448,11 +462,10 @@ void MainWindow::setUpTabs()
                const AssembledProgram &optimizedProgram,
                bool withForwarding)
         {
-            // Use the same hazard model that was selected when suggestions
-            // were generated for BOTH benchmark runs.
-            processorChanged(withForwarding
-                ? ProcessorType::RV5Stage_H_F
-                : ProcessorType::RV5Stage_H_NF);
+            // Remember the hazard model selected when suggestions were
+            // generated. The CPU is (re)selected explicitly before EACH
+            // benchmark run (original, then optimized), not just once here.
+            m_benchmarkWithForwarding = withForwarding;
 
             m_benchmarkOriginalProgram = originalProgram;
             m_benchmarkOptimizedProgram = optimizedProgram;
@@ -565,6 +578,17 @@ void MainWindow::processorChanged(const ProcessorType &vmType)
 }
 
 
+// ===== KITES Phase 1 contribution: per-run benchmark processor selection =====
+// Selects H_F or H_NF (freshly created processor, zeroed counters) so each
+// benchmark run starts from a known CPU model and its metrics stay independent.
+void MainWindow::selectBenchmarkProcessor()
+{
+    processorChanged(m_benchmarkWithForwarding
+        ? ProcessorType::RV5Stage_H_F
+        : ProcessorType::RV5Stage_H_NF);
+}
+// ===== End KITES Phase 1 contribution =====
+
 void MainWindow::startBenchmarkOriginalRun()
 {
     if (!m_benchmarkOptimizedProgram)
@@ -600,13 +624,17 @@ void MainWindow::startBenchmarkOriginalRun()
         editor->setExpandedLocked(true);
     }
 
-    qDebug() << "[Benchmark] Processor type:"
+    // 1. Select H_F or H_NF before the original program.
+    selectBenchmarkProcessor();
+
+    qDebug() << "[Benchmark] Original run; processor type:"
          << static_cast<int>(m_processorManager->getProcessorType());
 
+    // 2. Reset and execute the original program.
     m_processorManager->clearBreakpoints();
     m_processorManager->reset();
     m_processorManager->loadProgram(*m_benchmarkOriginalProgram);
-    initializeBenchmarkRegisters();
+    initializeBenchmarkRegisters(*m_benchmarkOriginalProgram);
 
     emit runProcessorSignal();
 }
@@ -630,10 +658,17 @@ void MainWindow::startBenchmarkOptimizedRun()
     qDebug() << "[Benchmark] Text buffer size:"
              << m_benchmarkOptimizedProgram->text_buffer.size();
 
+    // 3. Select H_F or H_NF again before the optimized program.
+    selectBenchmarkProcessor();
+
+    qDebug() << "[Benchmark] Optimized run; processor type:"
+             << static_cast<int>(m_processorManager->getProcessorType());
+
+    // 4. Reset and execute the optimized program.
     m_processorManager->clearBreakpoints();
     m_processorManager->reset();
     m_processorManager->loadProgram(*m_benchmarkOptimizedProgram);
-    initializeBenchmarkRegisters();
+    initializeBenchmarkRegisters(*m_benchmarkOptimizedProgram);
 
     qDebug() << "[Benchmark] Optimized program loaded; starting processor.";
 
@@ -645,7 +680,14 @@ void MainWindow::startBenchmarkOptimizedRun()
 // all-zero reset state accidentally skipping useful branch paths in benchmark
 // programs that compare input registers. Programs can still override these
 // values through their own initial instructions.
-void MainWindow::initializeBenchmarkRegisters()
+//
+// Registers used as the base address of a load/store are the exception: a
+// small constant such as 2 would make "sd x6, 8(x10)" write to address 10,
+// which is inside the program text (instruction memory starts at address 0).
+// The store then overwrites instructions, so the benchmark would measure a
+// corrupted program, and which instruction gets damaged depends on the
+// schedule. Point those registers into the data segment instead.
+void MainWindow::initializeBenchmarkRegisters(const AssembledProgram &program)
 {
     auto *registers = m_processorManager->getRegisterFile();
     if (!registers)
@@ -653,6 +695,27 @@ void MainWindow::initializeBenchmarkRegisters()
 
     for (std::size_t reg = 1; reg < 32; ++reg)
         registers->WriteGpr(reg, (reg % 2) ? 1u : 2u);
+
+    static const std::unordered_set<std::string> kMemoryOpcodes = {
+        "lb", "lh", "lw", "ld", "lbu", "lhu", "lwu", "flw", "fld",
+        "sb", "sh", "sw", "sd", "fsw", "fsd"};
+
+    const uint64_t dataBase = vm_config::config.getDataSectionStart();
+    for (const auto &entry : program.intermediate_code)
+    {
+        const ICUnit &instruction = entry.first;
+        if (kMemoryOpcodes.count(instruction.getOpcode()) == 0)
+            continue;
+
+        // For loads and stores rs1 is always the base-address register.
+        const std::string base = instruction.getRs1();
+        if (base.size() < 2 || base[0] != 'x')
+            continue;
+
+        const int index = std::stoi(base.substr(1));
+        if (index > 0 && index < 32)
+            registers->WriteGpr(static_cast<std::size_t>(index), dataBase);
+    }
 }
 
 // KITES Phase 1 contribution: capture each run and sequence original then optimized execution.
@@ -665,6 +728,8 @@ void MainWindow::runFinishedSlot()
 
     if (m_benchmarkStage == BenchmarkStage::OriginalRun)
     {
+        // 5. Capture metrics independently: read the original run's counters
+        // and registers now, before the CPU is re-selected for the next run.
         captureBenchmarkMetrics(m_originalMetrics);
         {
             auto* registers = m_processorManager->getRegisterFile();
@@ -683,6 +748,7 @@ void MainWindow::runFinishedSlot()
 
     if (m_benchmarkStage == BenchmarkStage::OptimizedRun)
     {
+        // Independent capture from the optimized run's own processor instance.
         captureBenchmarkMetrics(m_optimizedMetrics);
         {
             auto* registers = m_processorManager->getRegisterFile();

@@ -77,9 +77,11 @@ private:
     std::optional<AssembledProgram> m_benchmarkOriginalProgram;
     std::optional<AssembledProgram> m_benchmarkOptimizedProgram;
 
+    bool m_benchmarkWithForwarding = false;
+    void selectBenchmarkProcessor();
     void startBenchmarkOriginalRun();
     void startBenchmarkOptimizedRun();
-    void initializeBenchmarkRegisters();
+    void initializeBenchmarkRegisters(const AssembledProgram &program);
     void captureBenchmarkMetrics(PerformanceMetrics &metrics);
 
     // Existing MainWindow methods

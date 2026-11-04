@@ -10,7 +10,6 @@
 #include <cstdint>
 #include <iostream>
 
-
 #include "processor/pipeline_registers.h"
 
 namespace Kites
@@ -35,9 +34,47 @@ int check_data_hazard(const IF_ID_Register &if_id_reg, const ID_EX_Register &id_
     // --- 1. Extract Source Register Indices from IF/ID Instruction (Dependent) ---
     uint32_t instruction = if_id_reg.instruction;
 
-    // GPR Source Registers (rs1/rs2 fields)
-    uint8_t if_id_rs1 = (instruction >> 15) & 0x1F;
-    uint8_t if_id_rs2 = (instruction >> 20) & 0x1F;
+    // Decode actual GPR sources from the instruction opcode. The rs2 bit
+    // positions are immediate bits for I/U/J formats and must not be treated
+    // as a register dependency (e.g. addi x10, x7, 200).
+    const uint8_t opcode = instruction & 0x7F;
+    const uint8_t funct3 = (instruction >> 12) & 0x7;
+    const uint8_t if_id_rs1 = (instruction >> 15) & 0x1F;
+    const uint8_t if_id_rs2 = (instruction >> 20) & 0x1F;
+    bool reads_gpr_rs1 = false;
+    bool reads_gpr_rs2 = false;
+
+    switch (opcode)
+    {
+    case 0x33: // R-type integer register-register
+    case 0x3B: // R-type word operations
+    case 0x63: // B-type conditional branches
+    case 0x2F: // A-type atomic operations
+        reads_gpr_rs1 = true;
+        reads_gpr_rs2 = true;
+        break;
+    case 0x13: // I-type integer immediate
+    case 0x1B: // I-type word immediate
+    case 0x03: // I-type integer loads
+    case 0x07: // I-type floating-point loads (base is GPR)
+    case 0x67: // I-type JALR
+        reads_gpr_rs1 = true;
+        break;
+    case 0x23: // S-type integer stores
+        reads_gpr_rs1 = true;
+        reads_gpr_rs2 = true;
+        break;
+    case 0x27: // S-type floating-point stores (base is GPR; rs2 is FPR)
+        reads_gpr_rs1 = true;
+        break;
+    case 0x73: // CSR register forms; funct3=0 is system, funct3[2] is immediate
+        reads_gpr_rs1 = (funct3 != 0 && funct3 < 4);
+        break;
+    default:
+        // U-type (LUI/AUIPC), J-type (JAL), and FP arithmetic do not
+        // consume GPR rs1/rs2 fields.
+        break;
+    }
 
     // FPR Source Registers (frs1/frs2/frs3 fields)
     // Note: F-type instructions reuse the rs1/rs2 bit-fields for frs1/frs2
@@ -48,28 +85,50 @@ int check_data_hazard(const IF_ID_Register &if_id_reg, const ID_EX_Register &id_
     // --- 2. Check for GPR Hazard (Source writes GPR, Dependent reads GPR) ---
     // Two-cycle hazard: current EX/MEM instruction writes a GPR the IF/ID instruction reads
     bool gpr_hazard_two_cycle = (ex_mem_reg.reg_write && (ex_mem_reg.rd != 0)) &&
-                                (ex_mem_reg.rd == if_id_rs1 || ex_mem_reg.rd == if_id_rs2);
+                                ((reads_gpr_rs1 && ex_mem_reg.rd == if_id_rs1) ||
+                                 (reads_gpr_rs2 && ex_mem_reg.rd == if_id_rs2));
 
     // One-cycle hazard: previous EX/MEM instruction (now further down) writes a GPR the IF/ID
     // instruction reads
-    bool gpr_hazard_one_cycle =
-        (ex_mem_reg.prev_reg_write && (ex_mem_reg.prev_rd != 0)) &&
-        (ex_mem_reg.prev_rd == if_id_rs1 || ex_mem_reg.prev_rd == if_id_rs2);
+    bool gpr_hazard_one_cycle = (ex_mem_reg.prev_reg_write && (ex_mem_reg.prev_rd != 0)) &&
+                                ((reads_gpr_rs1 && ex_mem_reg.prev_rd == if_id_rs1) ||
+                                 (reads_gpr_rs2 && ex_mem_reg.prev_rd == if_id_rs2));
 
     bool gpr_hazard = gpr_hazard_one_cycle || gpr_hazard_two_cycle;
 
-    // --- 3. Check for FPR Hazard (Source writes FPR, Dependent reads FPR) ---
-    // Note: FPR f0 is NOT hardwired to zero (unlike GPR x0), so no frd != 0 check needed.
-    // Two-cycle hazard: current EX/MEM instruction writes an FPR the IF/ID instruction reads
-    bool fpr_hazard_two_cycle =
-        (ex_mem_reg.freg_write) && (ex_mem_reg.frd == if_id_frs1 || ex_mem_reg.frd == if_id_frs2 ||
-                                    ex_mem_reg.frd == if_id_frs3);
+    // Determine which FPR fields are real sources for this instruction.
+    // Integer instructions and FP loads must not accidentally interpret
+    // immediate/address bits as floating-point source registers.
+    const uint8_t funct7 = (instruction >> 25) & 0x7F;
+    bool reads_fpr_rs1 = false;
+    bool reads_fpr_rs2 = false;
+    bool reads_fpr_rs3 = false;
+    if (opcode == 0x43 || opcode == 0x47 || opcode == 0x4B || opcode == 0x4F)
+    { // FMA formats: three FPR sources
+        reads_fpr_rs1 = reads_fpr_rs2 = reads_fpr_rs3 = true;
+    }
+    else if (opcode == 0x53)
+    { // OP-FP: arithmetic/compare operations use two sources; unary/conversion use one
+        reads_fpr_rs1 = !(funct7 == 0x68 || funct7 == 0x78);
+        reads_fpr_rs2 = !(funct7 == 0x2C || funct7 == 0x60 || funct7 == 0x68 || funct7 == 0x70 ||
+                          funct7 == 0x78);
+    }
+    else if (opcode == 0x27)
+    { // FP store: rs2 is the FPR value being stored
+        reads_fpr_rs2 = true;
+    }
 
-    // One-cycle hazard: previous EX/MEM instruction writes an FPR the IF/ID instruction reads
-    bool fpr_hazard_one_cycle =
-        (ex_mem_reg.prev_freg_write) &&
-        (ex_mem_reg.prev_frd == if_id_frs1 || ex_mem_reg.prev_frd == if_id_frs2 ||
-         ex_mem_reg.prev_frd == if_id_frs3);
+    // --- 3. Check for FPR Hazard (Source writes FPR, Dependent reads FPR) ---
+    // FPR f0 is not hardwired to zero.
+    const bool reads_matching_fpr = (reads_fpr_rs1 && ex_mem_reg.frd == if_id_frs1) ||
+                                    (reads_fpr_rs2 && ex_mem_reg.frd == if_id_frs2) ||
+                                    (reads_fpr_rs3 && ex_mem_reg.frd == if_id_frs3);
+    const bool reads_matching_prev_fpr = (reads_fpr_rs1 && ex_mem_reg.prev_frd == if_id_frs1) ||
+                                         (reads_fpr_rs2 && ex_mem_reg.prev_frd == if_id_frs2) ||
+                                         (reads_fpr_rs3 && ex_mem_reg.prev_frd == if_id_frs3);
+
+    bool fpr_hazard_two_cycle = ex_mem_reg.freg_write && reads_matching_fpr;
+    bool fpr_hazard_one_cycle = ex_mem_reg.prev_freg_write && reads_matching_prev_fpr;
 
     bool fpr_hazard = fpr_hazard_one_cycle || fpr_hazard_two_cycle;
 
@@ -88,11 +147,13 @@ int check_data_hazard(const IF_ID_Register &if_id_reg, const ID_EX_Register &id_
         {
             // Check if the load destination matches any source of the dependent instruction
             bool gpr_load_use = (id_ex_reg.reg_write && id_ex_reg.rd != 0) &&
-                                (id_ex_reg.rd == if_id_rs1 || id_ex_reg.rd == if_id_rs2);
+                                ((reads_gpr_rs1 && id_ex_reg.rd == if_id_rs1) ||
+                                 (reads_gpr_rs2 && id_ex_reg.rd == if_id_rs2));
 
-            bool fpr_load_use = (id_ex_reg.freg_write) &&
-                                (id_ex_reg.frd == if_id_frs1 || id_ex_reg.frd == if_id_frs2 ||
-                                 id_ex_reg.frd == if_id_frs3);
+            bool fpr_load_use =
+                (id_ex_reg.freg_write) && ((reads_fpr_rs1 && id_ex_reg.frd == if_id_frs1) ||
+                                           (reads_fpr_rs2 && id_ex_reg.frd == if_id_frs2) ||
+                                           (reads_fpr_rs3 && id_ex_reg.frd == if_id_frs3));
 
             if (gpr_load_use || fpr_load_use)
             {
@@ -118,4 +179,4 @@ int check_data_hazard(const IF_ID_Register &if_id_reg, const ID_EX_Register &id_
 
     return STALL_NONE;
 }
-}//namespace Kites
+} // namespace Kites
