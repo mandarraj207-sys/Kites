@@ -275,6 +275,18 @@ ScheduleResult scheduleForwardingBasicBlock(
                 if (scheduled[candidate])
                     continue;
 
+                // AUIPC's result depends on its own PC. Keep it at its
+                // original output slot, but do not make it a dependency
+                // barrier for other instructions.
+                const std::size_t outputSlot = order.size();
+                const bool slotIsAuipc =
+                    block[regionStart + outputSlot].getOpcode() == "auipc";
+                const bool candidateIsAuipc =
+                    block[regionStart + candidate].getOpcode() == "auipc";
+                if ((slotIsAuipc && candidate != outputSlot) ||
+                    (!slotIsAuipc && candidateIsAuipc))
+                    continue;
+
                 bool ready = true;
 
                 for (std::size_t pred = 0; pred < candidate; ++pred)

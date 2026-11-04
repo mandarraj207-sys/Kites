@@ -6,6 +6,9 @@
 
 #include <functional>
 #include <optional>
+#include <map>
+#include <vector>
+#include <utility>
 
 class QSpinBox;
 class QComboBox;
@@ -33,11 +36,14 @@ public:
     explicit OptimizerTab(EditorTab *editor, QWidget *parent = nullptr);
 
     void setLoadHandler(
-        std::function<void(const AssembledProgram &)> handler);
+        std::function<void(const AssembledProgram &, bool)> handler);
 
     void setBenchmarkHandler(
         std::function<void(const AssembledProgram &, const AssembledProgram &, bool)> handler);
     
+    // Mirrors the editor tab pipeline-stage highlight in both instruction listings.
+    void setExecutionHighlights(const std::vector<std::pair<int, std::string>> &editorLines);
+
     void showBenchmarkResults(
         const OptimizerBenchmarkMetrics &original,
         const OptimizerBenchmarkMetrics &optimized);
@@ -46,12 +52,15 @@ private:
     void optimizeCurrentSource();
     void loadOptimizedProgram();
     void benchmarkOptimizedProgram();
+    bool ensureSuggestionsMatchSelectedModel();
 
     EditorTab *m_editor = nullptr;
     QComboBox *m_hazardModelComboBox = nullptr;
     QLabel *m_statusLabel = nullptr;
     QPlainTextEdit *m_originalOutput = nullptr;
     QPlainTextEdit *m_optimizedOutput = nullptr;
+    std::map<int, std::vector<int>> m_originalSourceLineBlocks;
+    std::map<int, std::vector<int>> m_optimizedSourceLineBlocks;
 
     QPushButton *m_optimizeButton = nullptr;
     QPushButton *m_loadButton = nullptr;
@@ -61,7 +70,7 @@ private:
     std::optional<AssembledProgram> m_optimizedProgram;
     bool m_optimizedWithForwarding = false;
 
-    std::function<void(const AssembledProgram &)> m_loadHandler;
+    std::function<void(const AssembledProgram &, bool)> m_loadHandler;
 
     std::function<void(
         const AssembledProgram &,
