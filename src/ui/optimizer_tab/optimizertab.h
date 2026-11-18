@@ -15,6 +15,8 @@ class QComboBox;
 class QLabel;
 class QPushButton;
 class QSplitter;
+class QTabWidget;
+class QWidget;
 class QVBoxLayout;
 
 namespace Kites {
@@ -48,6 +50,9 @@ private:
     void addHazardModelSelector(QVBoxLayout *layout);
     void addActionButtons(QVBoxLayout *layout);
     void addListings(QVBoxLayout *layout);
+    void addAnalyzer(QWidget *page);
+    void updateDependencyAnalysis(const AssembledProgram &program);
+    void copyOptimizedAssembly();
     InstructionListingTextEdit *createListingPanel(QSplitter *splitter, const QString &title,
                                        const QString &placeholder,
                                        InstructionListingHighlighter **highlighter);
@@ -64,6 +69,13 @@ private:
     EditorTab *m_editor = nullptr;
     QComboBox *m_hazardModelComboBox = nullptr;
     QLabel *m_statusLabel = nullptr;
+    QTabWidget *m_innerTabs = nullptr;
+    QLabel *m_instructionCountLabel = nullptr;
+    QLabel *m_movedCountLabel = nullptr;
+    QLabel *m_rawCountLabel = nullptr;
+    QLabel *m_warCountLabel = nullptr;
+    QLabel *m_wawCountLabel = nullptr;
+    QLabel *m_benchmarkSummaryLabel = nullptr;
     InstructionListingTextEdit *m_originalOutput = nullptr;
     InstructionListingTextEdit *m_optimizedOutput = nullptr;
     InstructionListingHighlighter *m_originalHighlighter = nullptr;
@@ -74,6 +86,7 @@ private:
     QPushButton *m_optimizeButton = nullptr;
     QPushButton *m_loadButton = nullptr;
     QPushButton *m_benchmarkButton = nullptr;
+    QPushButton *m_copyButton = nullptr;
 
     std::optional<AssembledProgram> m_originalProgram;
     std::optional<AssembledProgram> m_optimizedProgram;
