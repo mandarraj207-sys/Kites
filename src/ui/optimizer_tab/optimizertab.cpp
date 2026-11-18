@@ -4,11 +4,15 @@
 #include "optimizer/program_optimizer.h"
 #include "optimizer/scheduler_core.h"
 #include "ui/editor_tab/editortab.h"
-#include "ui/optimizer_tab/benchmark_results_dialog.h"
 #include "ui/optimizer_tab/instruction_listing.h"
 #include "ui/optimizer_tab/instruction_listing_highlighter.h"
 
 #include <QComboBox>
+#include <QApplication>
+#include <QClipboard>
+#include <QGridLayout>
+#include <QGroupBox>
+#include <QHBoxLayout>
 #include <QDebug>
 #include <QFontDatabase>
 #include <QFormLayout>
@@ -17,10 +21,13 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSplitter>
+#include <QTabWidget>
+#include <QWidget>
 #include <QStringList>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <sstream>
 #include <set>
 
 #include <exception>
@@ -132,6 +139,80 @@ DependencyRegisterMap dependencyRegistersForListing(
     }
     return result;
 }
+
+struct DependencyCounts
+{
+    std::size_t raw = 0;
+    std::size_t war = 0;
+    std::size_t waw = 0;
+};
+
+DependencyCounts countDependencies(const AssembledProgram &program)
+{
+    std::vector<optimizer::detail::InstructionInfo> info;
+    info.reserve(program.intermediate_code.size());
+    for (const auto &entry : program.intermediate_code)
+        info.push_back(optimizer::detail::describe(entry.first));
+
+    std::set<std::size_t> labelBoundaries;
+    for (const auto &[name, symbol] : program.symbol_table)
+    {
+        (void)name;
+        if (!symbol.isData && symbol.address % 4 == 0)
+        {
+            const auto index = static_cast<std::size_t>(symbol.address / 4);
+            if (index < info.size())
+                labelBoundaries.insert(index);
+        }
+    }
+
+    DependencyCounts counts;
+    std::size_t begin = 0;
+    while (begin < info.size())
+    {
+        if (!info[begin].supported || info[begin].is_store)
+        {
+            ++begin;
+            continue;
+        }
+
+        std::size_t end = begin;
+        while (end < info.size() &&
+               (end == begin || !labelBoundaries.count(end)) &&
+               info[end].supported && !info[end].is_store)
+        {
+            const bool branch =
+                optimizer::detail::isConditionalBranch(program.intermediate_code[end].first);
+            ++end;
+            if (branch)
+                break;
+        }
+
+        for (std::size_t i = begin; i < end; ++i)
+        {
+            for (std::size_t j = i + 1; j < end; ++j)
+            {
+                const auto &a = info[i];
+                const auto &b = info[j];
+
+                for (const auto &reg : a.writes)
+                    if (std::find(b.reads.begin(), b.reads.end(), reg) != b.reads.end())
+                        ++counts.raw;
+
+                for (const auto &reg : a.reads)
+                    if (std::find(b.writes.begin(), b.writes.end(), reg) != b.writes.end())
+                        ++counts.war;
+
+                for (const auto &reg : a.writes)
+                    if (std::find(b.writes.begin(), b.writes.end(), reg) != b.writes.end())
+                        ++counts.waw;
+            }
+        }
+        begin = end;
+    }
+    return counts;
+}
+
 } // namespace
 
 OptimizerTab::OptimizerTab(EditorTab *editor, QWidget *parent) : KitesTab(parent), m_editor(editor)
@@ -142,19 +223,29 @@ OptimizerTab::OptimizerTab(EditorTab *editor, QWidget *parent) : KitesTab(parent
 
     addHeading(layout);
     addHazardModelSelector(layout);
-    addActionButtons(layout);
-
     m_statusLabel =
         new QLabel("Ready. Generate suggestions without changing the original source.", this);
     m_statusLabel->setWordWrap(true);
     layout->addWidget(m_statusLabel);
 
-    addListings(layout);
+    m_innerTabs = new QTabWidget(this);
+
+    auto *reorderedPage = new QWidget(m_innerTabs);
+    auto *reorderedLayout = new QVBoxLayout(reorderedPage);
+    reorderedLayout->setContentsMargins(8, 8, 8, 8);
+    reorderedLayout->setSpacing(10);
+    addActionButtons(reorderedLayout);
+    addListings(reorderedLayout);
+    m_innerTabs->addTab(reorderedPage, "Reordered Code");
+
+    auto *analyzerPage = new QWidget(m_innerTabs);
+    addAnalyzer(analyzerPage);
+    m_innerTabs->addTab(analyzerPage, "Analyzer");
+
+    layout->addWidget(m_innerTabs, 1);
 
     connect(m_optimizeButton, &QPushButton::clicked, this, &OptimizerTab::optimizeCurrentSource);
     connect(m_loadButton, &QPushButton::clicked, this, &OptimizerTab::loadOptimizedProgram);
-    connect(m_benchmarkButton, &QPushButton::clicked, this,
-            &OptimizerTab::benchmarkOptimizedProgram);
 }
 
 void OptimizerTab::addHeading(QVBoxLayout *layout)
@@ -184,16 +275,24 @@ void OptimizerTab::addHazardModelSelector(QVBoxLayout *layout)
 
 void OptimizerTab::addActionButtons(QVBoxLayout *layout)
 {
+    auto *toolbar = new QHBoxLayout();
+    toolbar->setSpacing(8);
+
     m_optimizeButton = new QPushButton("Generate Suggestions", this);
     m_loadButton = new QPushButton("Execute Optimized Program", this);
-    m_benchmarkButton = new QPushButton("Benchmark Original vs Optimized", this);
+    m_copyButton = new QPushButton("Copy Optimized Assembly", this);
 
     m_loadButton->setEnabled(false);
-    m_benchmarkButton->setEnabled(false);
+    m_copyButton->setEnabled(false);
 
-    layout->addWidget(m_optimizeButton);
-    layout->addWidget(m_loadButton);
-    layout->addWidget(m_benchmarkButton);
+    toolbar->addWidget(m_optimizeButton);
+    toolbar->addWidget(m_loadButton);
+    toolbar->addWidget(m_copyButton);
+    toolbar->addStretch(1);
+    layout->addLayout(toolbar);
+
+    connect(m_copyButton, &QPushButton::clicked,
+            this, &OptimizerTab::copyOptimizedAssembly);
 }
 
 void OptimizerTab::addListings(QVBoxLayout *layout)
@@ -217,6 +316,148 @@ void OptimizerTab::addListings(QVBoxLayout *layout)
     listingSplitter->setStretchFactor(0, 1);
     listingSplitter->setStretchFactor(1, 1);
     layout->addWidget(listingSplitter, 1);
+}
+
+void OptimizerTab::addAnalyzer(QWidget *page)
+{
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(14);
+
+    auto *profilerGroup = new QGroupBox("Profiler", page);
+    auto *profilerGrid = new QGridLayout(profilerGroup);
+    profilerGrid->setHorizontalSpacing(12);
+    profilerGrid->setVerticalSpacing(10);
+
+    auto makeMetric = [profilerGroup, profilerGrid](int row, int column,
+                                                    const QString &caption,
+                                                    QLabel **valueLabel) {
+        auto *cell = new QWidget(profilerGroup);
+        auto *cellLayout = new QVBoxLayout(cell);
+        cellLayout->setContentsMargins(10, 8, 10, 8);
+        cellLayout->setSpacing(4);
+
+        auto *name = new QLabel(caption, cell);
+        name->setStyleSheet(
+            "QLabel {"
+            " color: palette(text);"
+            " font-size: 12px;"
+            " font-weight: 500;"
+            " background: transparent;"
+            " border: none;"
+            "}"
+        );
+        *valueLabel = new QLabel("—", cell);
+        QFont valueFont = (*valueLabel)->font();
+        valueFont.setPointSize(valueFont.pointSize() + 3);
+        valueFont.setBold(true);
+        (*valueLabel)->setFont(valueFont);
+
+        cellLayout->addWidget(name);
+        cellLayout->addWidget(*valueLabel);
+        cell->setObjectName("metricCard");
+        cell->setStyleSheet(
+            "QWidget#metricCard { border: 1px solid palette(mid); border-radius: 6px; "
+            "background: palette(base); }");
+        profilerGrid->addWidget(cell, row, column);
+    };
+
+    makeMetric(0, 0, "Instructions", &m_instructionCountLabel);
+    makeMetric(0, 1, "Instructions moved", &m_movedCountLabel);
+    makeMetric(1, 0, "RAW dependencies", &m_rawCountLabel);
+    makeMetric(1, 1, "WAR dependencies", &m_warCountLabel);
+    makeMetric(1, 2, "WAW dependencies", &m_wawCountLabel);
+    profilerGrid->setColumnStretch(0, 1);
+    profilerGrid->setColumnStretch(1, 1);
+    profilerGrid->setColumnStretch(2, 1);
+    layout->addWidget(profilerGroup);
+
+    auto *benchmarkGroup = new QGroupBox("Benchmarker", page);
+    auto *benchmarkLayout = new QVBoxLayout(benchmarkGroup);
+    auto *benchmarkToolbar = new QHBoxLayout();
+    benchmarkToolbar->addWidget(new QLabel(
+        "Compare the original and optimized program using the selected hazard model.",
+        benchmarkGroup));
+    benchmarkToolbar->addStretch(1);
+
+    m_benchmarkButton = new QPushButton("Benchmark Original vs Optimized", benchmarkGroup);
+    m_benchmarkButton->setEnabled(false);
+    benchmarkToolbar->addWidget(m_benchmarkButton);
+    benchmarkLayout->addLayout(benchmarkToolbar);
+
+    m_benchmarkSummaryLabel = new QLabel(
+        "No benchmark has been run yet. Generate suggestions, then run the benchmark.",
+        benchmarkGroup);
+    m_benchmarkSummaryLabel->setWordWrap(true);
+    m_benchmarkSummaryLabel->setTextFormat(Qt::RichText);
+    m_benchmarkSummaryLabel->setStyleSheet(
+        "QLabel { border: 1px solid palette(mid); border-radius: 6px; "
+        "padding: 12px; background: palette(base); }");
+    benchmarkLayout->addWidget(m_benchmarkSummaryLabel);
+    layout->addWidget(benchmarkGroup);
+    layout->addStretch(1);
+
+    connect(m_benchmarkButton, &QPushButton::clicked,
+            this, &OptimizerTab::benchmarkOptimizedProgram);
+}
+
+void OptimizerTab::updateDependencyAnalysis(const AssembledProgram &program)
+{
+    const DependencyCounts counts = countDependencies(program);
+    if (m_instructionCountLabel)
+        m_instructionCountLabel->setText(
+            QString::number(static_cast<qulonglong>(program.intermediate_code.size())));
+    if (m_rawCountLabel)
+        m_rawCountLabel->setText(QString::number(static_cast<qulonglong>(counts.raw)));
+    if (m_warCountLabel)
+        m_warCountLabel->setText(QString::number(static_cast<qulonglong>(counts.war)));
+    if (m_wawCountLabel)
+        m_wawCountLabel->setText(QString::number(static_cast<qulonglong>(counts.waw)));
+}
+
+void OptimizerTab::copyOptimizedAssembly()
+{
+    if (!m_optimizedProgram)
+        return;
+
+    // Reconstruct pasteable assembly from the scheduled IC stream. Emit labels
+    // at their symbol-table target addresses, then emit one instruction per line.
+    std::map<std::size_t, QStringList> labelsAtIndex;
+    for (const auto &[name, symbol] : m_optimizedProgram->symbol_table)
+    {
+        if (symbol.isData || (symbol.address % 4) != 0)
+            continue;
+        const auto index = static_cast<std::size_t>(symbol.address / 4);
+        if (index < m_optimizedProgram->intermediate_code.size())
+            labelsAtIndex[index].append(QString::fromStdString(name) + ":");
+    }
+
+    QStringList lines;
+    for (std::size_t i = 0; i < m_optimizedProgram->intermediate_code.size(); ++i)
+    {
+        for (const auto &label : labelsAtIndex[i])
+            lines.append(label);
+
+        const auto &instruction = m_optimizedProgram->intermediate_code[i].first;
+        std::ostringstream stream;
+        stream << instruction;
+        QString instructionText = QString::fromStdString(stream.str()).trimmed();
+
+        // ICUnit's debug formatter appends its internal label as "<name>".
+        // Labels are emitted above in assembler syntax, so strip that suffix.
+        if (!instruction.label.empty())
+        {
+            const QString suffix = " <" + QString::fromStdString(instruction.label) + ">";
+            if (instructionText.endsWith(suffix))
+                instructionText.chop(suffix.size());
+        }
+
+        if (!instructionText.isEmpty())
+            lines.append("    " + instructionText);
+    }
+
+    QApplication::clipboard()->setText(lines.join('\n'));
+    m_statusLabel->setText("Optimized assembly copied to clipboard.");
 }
 
 InstructionListingTextEdit *OptimizerTab::createListingPanel(QSplitter *splitter, const QString &title,
@@ -348,12 +589,19 @@ void OptimizerTab::optimizeCurrentSource()
         AssembledProgram optimized = optimizer::buildOptimizedProgram(original, schedule);
 
         showListings(original, optimized);
+        updateDependencyAnalysis(original);
+        if (m_movedCountLabel)
+            m_movedCountLabel->setText(
+                QString::number(static_cast<qulonglong>(schedule.moved_instructions)));
+        if (m_benchmarkSummaryLabel)
+            m_benchmarkSummaryLabel->setText("No benchmark has been run yet.");
 
         m_originalProgram = std::move(original);
         m_optimizedProgram = std::move(optimized);
         m_optimizedWithForwarding = forwardingEnabled;
 
         m_loadButton->setEnabled(true);
+        m_copyButton->setEnabled(true);
         m_benchmarkButton->setEnabled(true);
 
         m_statusLabel->setText(QString("Suggestions generated. Instructions moved: %1. "
@@ -374,6 +622,7 @@ void OptimizerTab::resetResults()
     m_optimizedWithForwarding = false;
 
     m_loadButton->setEnabled(false);
+    m_copyButton->setEnabled(false);
     m_benchmarkButton->setEnabled(false);
     m_originalOutput->clear();
     m_optimizedOutput->clear();
@@ -381,6 +630,13 @@ void OptimizerTab::resetResults()
     m_optimizedOutput->setDependencies({}, {});
     m_originalSourceLineBlocks.clear();
     m_optimizedSourceLineBlocks.clear();
+    for (QLabel *label : {m_instructionCountLabel, m_movedCountLabel,
+                          m_rawCountLabel, m_warCountLabel, m_wawCountLabel})
+        if (label)
+            label->setText("—");
+    if (m_benchmarkSummaryLabel)
+        m_benchmarkSummaryLabel->setText(
+            "No benchmark has been run yet. Generate suggestions, then run the benchmark.");
 }
 
 void OptimizerTab::showListings(const AssembledProgram &original,
@@ -418,11 +674,18 @@ void OptimizerTab::handleOptimizationFailure(const QString &reason)
 
     m_optimizedProgram.reset();
     m_loadButton->setEnabled(false);
+    m_copyButton->setEnabled(false);
     m_originalOutput->clear();
     m_optimizedOutput->clear();
 
     m_originalOutput->setDependencies({}, {});
     m_optimizedOutput->setDependencies({}, {});
+    for (QLabel *label : {m_instructionCountLabel, m_movedCountLabel,
+                          m_rawCountLabel, m_warCountLabel, m_wawCountLabel})
+        if (label)
+            label->setText("—");
+    if (m_benchmarkSummaryLabel)
+        m_benchmarkSummaryLabel->setText("Optimization failed; no analysis available.");
 
     m_statusLabel->setText("Optimization failed.");
 
@@ -439,11 +702,53 @@ void OptimizerTab::setExecutionHighlights(
 void OptimizerTab::showBenchmarkResults(const OptimizerBenchmarkMetrics &original,
                                         const OptimizerBenchmarkMetrics &optimized)
 {
-    BenchmarkResultsDialog dialog(original, optimized, this);
+    const auto percentChange = [](unsigned int before, unsigned int after) {
+        if (before == 0)
+            return QString("n/a");
+        const double change =
+            (static_cast<double>(after) - static_cast<double>(before)) * 100.0 /
+            static_cast<double>(before);
+        return QString("%1%2%")
+            .arg(change > 0.0 ? "+" : "")
+            .arg(change, 0, 'f', 1);
+    };
 
-    m_statusLabel->setText(
-        "Benchmark complete. Graphical results are shown in the comparison window.");
-    dialog.exec();
+    if (m_benchmarkSummaryLabel)
+    {
+        const QString table =
+            "<table width='100%' cellspacing='0' cellpadding='8'>"
+            "<tr><th align='left'></th><th align='left'>Original</th>"
+            "<th align='left'>Optimized</th><th align='left'>Change</th></tr>"
+            "<tr><td><b>Cycles</b></td><td>%1</td><td>%2</td><td>%3</td></tr>"
+            "<tr><td><b>Stalls</b></td><td>%4</td><td>%5</td><td>%6</td></tr>"
+            "<tr><td><b>Instructions retired</b></td><td>%7</td><td>%8</td><td>—</td></tr>"
+            "<tr><td><b>CPI</b></td><td>%9</td><td>%10</td><td>—</td></tr>"
+            "</table>"
+            "<p><b>Integrity check:</b> %11</p>"
+            "<style>td,th { border-bottom: 1px solid palette(mid); }</style>";
+
+        const QString integrity =
+            original.instructionsRetired == optimized.instructionsRetired
+                ? "PASS — retired instruction counts match"
+                : "WARNING — retired instruction counts differ";
+
+        m_benchmarkSummaryLabel->setText(
+            table.arg(original.cycles)
+                .arg(optimized.cycles)
+                .arg(percentChange(original.cycles, optimized.cycles))
+                .arg(original.stalls)
+                .arg(optimized.stalls)
+                .arg(percentChange(original.stalls, optimized.stalls))
+                .arg(original.instructionsRetired)
+                .arg(optimized.instructionsRetired)
+                .arg(QString::number(original.cpi, 'f', 3))
+                .arg(QString::number(optimized.cpi, 'f', 3))
+                .arg(integrity));
+    }
+
+    m_statusLabel->setText("Benchmark complete. Results are available in the Analyzer tab.");
+    if (m_innerTabs)
+        m_innerTabs->setCurrentIndex(1);
 }
 
 } // namespace Kites
