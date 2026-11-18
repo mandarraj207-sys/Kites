@@ -43,3 +43,4 @@ cmake-build-*/
 # Temporary files
 *.tmp
 *.log
+*.bak
