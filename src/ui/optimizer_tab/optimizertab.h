@@ -1,8 +1,8 @@
-
 #pragma once
 
 #include "ui/common/kitestab.h"
 #include "common/assembled_program.h"
+#include "ui/optimizer_tab/optimizer_benchmark_metrics.h"
 
 #include <functional>
 #include <optional>
@@ -13,20 +13,15 @@
 class QSpinBox;
 class QComboBox;
 class QLabel;
-class QPlainTextEdit;
 class QPushButton;
+class QSplitter;
+class QVBoxLayout;
 
 namespace Kites {
 
 class EditorTab;
-
-struct OptimizerBenchmarkMetrics
-{
-    unsigned int cycles = 0;
-    unsigned int stalls = 0;
-    unsigned int instructionsRetired = 0;
-    float cpi = 0.0f;
-};
+class InstructionListingHighlighter;
+class InstructionListingTextEdit;
 
 class OptimizerTab : public KitesTab
 {
@@ -40,7 +35,7 @@ public:
 
     void setBenchmarkHandler(
         std::function<void(const AssembledProgram &, const AssembledProgram &, bool)> handler);
-    
+
     // Mirrors the editor tab pipeline-stage highlight in both instruction listings.
     void setExecutionHighlights(const std::vector<std::pair<int, std::string>> &editorLines);
 
@@ -49,16 +44,30 @@ public:
         const OptimizerBenchmarkMetrics &optimized);
 
 private:
+    void addHeading(QVBoxLayout *layout);
+    void addHazardModelSelector(QVBoxLayout *layout);
+    void addActionButtons(QVBoxLayout *layout);
+    void addListings(QVBoxLayout *layout);
+    InstructionListingTextEdit *createListingPanel(QSplitter *splitter, const QString &title,
+                                       const QString &placeholder,
+                                       InstructionListingHighlighter **highlighter);
+
     void optimizeCurrentSource();
     void loadOptimizedProgram();
     void benchmarkOptimizedProgram();
     bool ensureSuggestionsMatchSelectedModel();
 
+    void resetResults();
+    void showListings(const AssembledProgram &original, const AssembledProgram &optimized);
+    void handleOptimizationFailure(const QString &reason);
+
     EditorTab *m_editor = nullptr;
     QComboBox *m_hazardModelComboBox = nullptr;
     QLabel *m_statusLabel = nullptr;
-    QPlainTextEdit *m_originalOutput = nullptr;
-    QPlainTextEdit *m_optimizedOutput = nullptr;
+    InstructionListingTextEdit *m_originalOutput = nullptr;
+    InstructionListingTextEdit *m_optimizedOutput = nullptr;
+    InstructionListingHighlighter *m_originalHighlighter = nullptr;
+    InstructionListingHighlighter *m_optimizedHighlighter = nullptr;
     std::map<int, std::vector<int>> m_originalSourceLineBlocks;
     std::map<int, std::vector<int>> m_optimizedSourceLineBlocks;
 
