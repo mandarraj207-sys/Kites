@@ -20,13 +20,16 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSplitter>
 #include <QTabWidget>
 #include <QWidget>
 #include <QStringList>
+#include <QVariantAnimation>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <functional>
 #include <sstream>
 #include <set>
 
@@ -140,6 +143,53 @@ DependencyRegisterMap dependencyRegistersForListing(
     return result;
 }
 
+// Everything the expanded details need to know about one instruction. `positions`
+// maps each instruction to its index in the original program (null = identity).
+std::vector<InstructionDetail> instructionDetailsFor(const AssembledProgram &program,
+                                                     const std::vector<int> *positions,
+                                                     const std::vector<int> &movement)
+{
+    std::vector<InstructionDetail> details;
+    details.reserve(program.intermediate_code.size());
+    for (std::size_t i = 0; i < program.intermediate_code.size(); ++i)
+    {
+        const ICUnit &unit = program.intermediate_code[i].first;
+        const auto info = optimizer::detail::describe(unit);
+
+        int original = static_cast<int>(i);
+        if (positions && i < positions->size() && (*positions)[i] >= 0)
+            original = (*positions)[i];
+
+        InstructionDetail detail;
+        detail.originalIndex = static_cast<qlonglong>(original) + 1;
+        detail.sourceLine = static_cast<qlonglong>(unit.line_number);
+        detail.movement = i < movement.size() ? movement[i] : 0;
+        detail.assembly = QString::fromStdString(formatAssemblyInstruction(unit));
+        detail.reads = info.reads;
+        detail.writes = info.writes;
+        details.push_back(std::move(detail));
+    }
+    return details;
+}
+
+constexpr int kDetailsMaxHeight = 230;
+
+const QString kPrimaryButtonStyle =
+    "QPushButton { background: palette(highlight); color: palette(highlighted-text);"
+    "  border: none; border-radius: 6px; padding: 7px 16px; font-weight: 600; }"
+    "QPushButton:disabled { background: palette(midlight); color: palette(mid); }"
+    "QPushButton:pressed { padding-top: 8px; }";
+
+const QString kSecondaryButtonStyle =
+    "QPushButton { background: palette(button); color: palette(button-text);"
+    "  border: 1px solid palette(mid); border-radius: 6px; padding: 7px 16px; }"
+    "QPushButton:hover:enabled { background: palette(midlight); }"
+    "QPushButton:disabled { color: palette(mid); border-color: palette(midlight); }";
+
+const QString kBannerStyle =
+    "QLabel { padding: 8px 12px; border: 1px solid palette(midlight);"
+    "  border-radius: 6px; background: palette(alternate-base); color: palette(text); }";
+
 struct DependencyCounts
 {
     std::size_t raw = 0;
@@ -226,6 +276,7 @@ OptimizerTab::OptimizerTab(EditorTab *editor, QWidget *parent) : KitesTab(parent
     m_statusLabel =
         new QLabel("Ready. Generate suggestions without changing the original source.", this);
     m_statusLabel->setWordWrap(true);
+    m_statusLabel->setStyleSheet(kBannerStyle);
     layout->addWidget(m_statusLabel);
 
     m_innerTabs = new QTabWidget(this);
@@ -256,6 +307,11 @@ void OptimizerTab::addHeading(QVBoxLayout *layout)
     font.setBold(true);
     heading->setFont(font);
     layout->addWidget(heading);
+
+    auto *subtitle = new QLabel(
+        "Reorder instructions to cut pipeline stalls. Your editor source is never modified.", this);
+    subtitle->setStyleSheet("color: palette(text); font-size: 10pt;");
+    layout->addWidget(subtitle);
 }
 
 void OptimizerTab::addHazardModelSelector(QVBoxLayout *layout)
@@ -285,6 +341,15 @@ void OptimizerTab::addActionButtons(QVBoxLayout *layout)
     m_loadButton->setEnabled(false);
     m_copyButton->setEnabled(false);
 
+    m_optimizeButton->setStyleSheet(kPrimaryButtonStyle);
+    m_loadButton->setStyleSheet(kSecondaryButtonStyle);
+    m_copyButton->setStyleSheet(kSecondaryButtonStyle);
+    for (QPushButton *button : {m_optimizeButton, m_loadButton, m_copyButton})
+    {
+        button->setMinimumHeight(32);
+        button->setCursor(Qt::PointingHandCursor);
+    }
+
     toolbar->addWidget(m_optimizeButton);
     toolbar->addWidget(m_loadButton);
     toolbar->addWidget(m_copyButton);
@@ -307,9 +372,17 @@ void OptimizerTab::addListings(QVBoxLayout *layout)
                                            &m_optimizedHighlighter);
 
     auto *legend = new QLabel(
+        "<span style='color:#2ea078'>&#9632;</span> moved earlier &nbsp;&nbsp;"
+        "<span style='color:#e09628'>&#9632;</span> moved later &nbsp;&nbsp;"
+        "Rows without a colour kept their position.<br>"
         "Dependency registers are bold with a coloured underline; each register keeps its colour. "
-        "Click an instruction to draw its register dependencies as arrows.",
+        "Click an instruction to draw its arrows and expand its details; click it again to "
+        "collapse.<br>"
+        "<b>RAW</b> read after write &middot; <b>WAR</b> write after read &middot; "
+        "<b>WAW</b> write after write.",
         this);
+    legend->setTextFormat(Qt::RichText);
+    legend->setStyleSheet(kBannerStyle);
     legend->setWordWrap(true);
     layout->addWidget(legend);
 
@@ -467,16 +540,62 @@ InstructionListingTextEdit *OptimizerTab::createListingPanel(QSplitter *splitter
     auto *panel = new QWidget(splitter);
     auto *panelLayout = new QVBoxLayout(panel);
     panelLayout->setContentsMargins(0, 0, 0, 0);
+    panelLayout->setSpacing(6);
 
-    panelLayout->addWidget(new QLabel(title, panel));
+    auto *titleLabel = new QLabel(title, panel);
+    titleLabel->setStyleSheet("font-weight: 600; font-size: 11pt;");
+    panelLayout->addWidget(titleLabel);
 
     auto *output = new InstructionListingTextEdit(panel);
     output->setReadOnly(true);
     output->setLineWrapMode(QPlainTextEdit::NoWrap);
     output->setPlaceholderText(placeholder);
     output->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    output->setStyleSheet("QPlainTextEdit { padding: 8px; }");
-    panelLayout->addWidget(output);
+    output->setStyleSheet("QPlainTextEdit { padding: 8px; border: 1px solid palette(midlight);"
+                          " border-radius: 6px; }");
+    panelLayout->addWidget(output, 1);
+
+    // Expandable details for the clicked instruction. It stays collapsed (zero
+    // height) until a row is selected, then slides open to fit its content.
+    auto *details = new QScrollArea(panel);
+    details->setObjectName("dependencyDetails");
+    details->setWidgetResizable(true);
+    details->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    details->setStyleSheet("QScrollArea#dependencyDetails { border: 1px solid palette(mid);"
+                           " border-radius: 6px; background: palette(base); }"
+                           "QScrollArea#dependencyDetails > QWidget > QWidget { background: palette(base); }");
+    details->setFixedHeight(0);
+
+    auto *detailsLabel = new QLabel(details);
+    detailsLabel->setTextFormat(Qt::RichText);
+    detailsLabel->setWordWrap(true);
+    detailsLabel->setAlignment(Qt::AlignTop | Qt::AlignLeft);
+    detailsLabel->setMargin(10);
+    detailsLabel->setStyleSheet("QLabel { background: transparent; color: palette(text); }");
+    details->setWidget(detailsLabel);
+    panelLayout->addWidget(details, 0);
+
+    auto *animation = new QVariantAnimation(details);
+    animation->setDuration(160);
+    animation->setEasingCurve(QEasingCurve::OutCubic);
+    connect(animation, &QVariantAnimation::valueChanged, details,
+            [details](const QVariant &value) { details->setFixedHeight(value.toInt()); });
+
+    output->setSelectionChangedCallback([details, detailsLabel, animation](const QString &html) {
+        int target = 0;
+        if (!html.isEmpty())
+        {
+            detailsLabel->setText(html);
+            const int width = std::max(1, details->viewport()->width());
+            const int content = std::max(detailsLabel->sizeHint().height(),
+                                         detailsLabel->heightForWidth(width));
+            target = std::min(kDetailsMaxHeight, content + 2 * details->frameWidth() + 4);
+        }
+        animation->stop();
+        animation->setStartValue(details->height());
+        animation->setEndValue(target);
+        animation->start();
+    });
 
     // Parented to the document, so it lives as long as the listing does.
     if (highlighter)
@@ -628,6 +747,8 @@ void OptimizerTab::resetResults()
     m_optimizedOutput->clear();
     m_originalOutput->setDependencies({}, {});
     m_optimizedOutput->setDependencies({}, {});
+    m_originalOutput->setInstructionDetails({});
+    m_optimizedOutput->setInstructionDetails({});
     m_originalSourceLineBlocks.clear();
     m_optimizedSourceLineBlocks.clear();
     for (QLabel *label : {m_instructionCountLabel, m_movedCountLabel,
@@ -665,6 +786,24 @@ void OptimizerTab::showListings(const AssembledProgram &original,
                                       originalListing.instructionBlocks);
     m_optimizedOutput->setDependencies(optimizer::findRegisterDependencies(optimized),
                                        optimizedListing.instructionBlocks);
+
+    // -1 = the instruction now sits earlier than in the original, +1 = later.
+    std::vector<int> originalMovement(original.intermediate_code.size(), 0);
+    std::vector<int> optimizedMovement(optimized.intermediate_code.size(), 0);
+    for (std::size_t i = 0; i < optimizedMovement.size() && i < positions.size(); ++i)
+    {
+        const int from = positions[i];
+        if (from < 0 || from == static_cast<int>(i))
+            continue;
+        optimizedMovement[i] = from > static_cast<int>(i) ? -1 : 1;
+        if (static_cast<std::size_t>(from) < originalMovement.size())
+            originalMovement[static_cast<std::size_t>(from)] = optimizedMovement[i];
+    }
+
+    m_originalOutput->setInstructionDetails(
+        instructionDetailsFor(original, nullptr, originalMovement));
+    m_optimizedOutput->setInstructionDetails(
+        instructionDetailsFor(optimized, &positions, optimizedMovement));
 }
 
 void OptimizerTab::handleOptimizationFailure(const QString &reason)
@@ -680,6 +819,8 @@ void OptimizerTab::handleOptimizationFailure(const QString &reason)
 
     m_originalOutput->setDependencies({}, {});
     m_optimizedOutput->setDependencies({}, {});
+    m_originalOutput->setInstructionDetails({});
+    m_optimizedOutput->setInstructionDetails({});
     for (QLabel *label : {m_instructionCountLabel, m_movedCountLabel,
                           m_rawCountLabel, m_warCountLabel, m_wawCountLabel})
         if (label)

@@ -13,7 +13,10 @@
 #include <QTextEdit>
 #include <QTextFormat>
 #include <QMouseEvent>
+#include <QPalette>
+#include <QStringList>
 
+#include <algorithm>
 #include <map>
 #include <vector>
 
@@ -21,9 +24,6 @@ namespace Kites {
 namespace {
 
 constexpr int kIndexWidth = 4;
-constexpr int kOriginalIndexWidth = 5;
-constexpr int kSourceLineWidth = 11;
-constexpr int kStatusWidth = 10;
 constexpr int kAssemblyWidth = 32;
 constexpr int kHeaderLineCount = 2;
 constexpr int kGutterWidth = 6; // blank characters in front of the assembly, used by the arrows
@@ -35,6 +35,18 @@ constexpr int kRelatedRowAlpha = 35;
 // Producer box: border thickness in pixels and corner radius.
 constexpr qreal kProducerBoxPenWidth = 1.5;
 constexpr qreal kProducerBoxRadius = 3.0;
+
+// Rows the scheduler moved: a faint band plus a solid bar on the left edge.
+// Green = the instruction now sits earlier, amber = it now sits later.
+constexpr int kMovedRowAlpha = 34;
+constexpr qreal kMovedBarWidth = 3.0;
+const QColor kMovedEarlierColor(46, 160, 120);
+const QColor kMovedLaterColor(224, 150, 40);
+
+// Colours of the dependency-type chips in the expanded details.
+const QColor kRawColor(224, 82, 82);
+const QColor kWarColor(66, 133, 212);
+const QColor kWawColor(151, 112, 205);
 
 // Fixed-width columns for the monospace listing; widths are minimums, so
 // large numbers widen their column instead of shifting the assembly column.
@@ -81,66 +93,44 @@ LabelsByInstruction labelsByInstruction(const AssembledProgram &program)
     return labels;
 }
 
-void appendOriginalLabels(ListingView &view, const LabelsByInstruction &labels,
-                          std::size_t instructionIndex, int &blockNumber,
-                          const AssembledProgram &original)
+void appendLabels(ListingView &view, const LabelsByInstruction &labels,
+                  std::size_t instructionIndex, int &blockNumber)
 {
     const auto found = labels.find(instructionIndex);
     if (found == labels.end())
         return;
 
-    const bool hasTarget = instructionIndex < original.intermediate_code.size();
-    const qlonglong sourceLine =
-        hasTarget ? original.intermediate_code[instructionIndex].first.line_number : 0;
-
     for (const QString &name : found->second)
     {
-        view.text += numberColumn(static_cast<qlonglong>(instructionIndex + 1),
-                                  kIndexWidth) + " | " +
-                     numberColumn(sourceLine, kSourceLineWidth) + " | " +
-                     assemblyCell(QString("%1:").arg(name)) + "\n";
+        view.text += numberColumn(static_cast<qlonglong>(instructionIndex + 1), kIndexWidth) +
+                     " | " + assemblyCell(QString("%1:").arg(name)) + "\n";
         ++blockNumber;
     }
 }
 
-void appendOptimizedLabels(ListingView &view, const LabelsByInstruction &labels,
-                           std::size_t instructionIndex, int &blockNumber,
-                           const AssembledProgram &optimized,
-                           const std::vector<int> &originalPositions)
+QString typeChip(const QString &type)
 {
-    const auto found = labels.find(instructionIndex);
-    if (found == labels.end())
-        return;
+    const QColor &color = type == "RAW" ? kRawColor : (type == "WAR" ? kWarColor : kWawColor);
+    return QString("<b><span style='color:%1'>%2</span></b>").arg(color.name(), type);
+}
 
-    const bool hasTarget = instructionIndex < optimized.intermediate_code.size();
-    const qlonglong sourceLine =
-        hasTarget ? optimized.intermediate_code[instructionIndex].first.line_number : 0;
-    const int originalPosition =
-        hasTarget && instructionIndex < originalPositions.size()
-            ? originalPositions[instructionIndex]
-            : -1;
-    const QString status =
-        !hasTarget ? "LABEL"
-                   : (originalPosition >= 0 &&
-                              originalPosition != static_cast<int>(instructionIndex)
-                          ? "MOVED"
-                          : "UNCHANGED");
+// A dependency between two instructions can be several hazards at once
+// (e.g. "addi x6, x6, 1" after "add x6, ..." is both RAW and WAW).
+QStringList hazardTypes(const InstructionDetail &producer, const InstructionDetail &consumer,
+                        const std::string &reg)
+{
+    const auto has = [&reg](const std::vector<std::string> &list) {
+        return std::find(list.begin(), list.end(), reg) != list.end();
+    };
 
-    for (const QString &name : found->second)
-    {
-        const qlonglong optimizedLine = static_cast<qlonglong>(instructionIndex + 1);
-        const qlonglong originalLine =
-            originalPosition >= 0
-                ? static_cast<qlonglong>(originalPosition + 1)
-                : static_cast<qlonglong>(instructionIndex + 1);
-
-        view.text += numberColumn(optimizedLine, kIndexWidth) + " | " +
-                     numberColumn(originalLine, kOriginalIndexWidth) + " | " +
-                     numberColumn(sourceLine, kSourceLineWidth) + " | " +
-                     listingColumn(status, kStatusWidth) + " | " +
-                     assemblyCell(QString("%1:").arg(name)) + "\n";
-        ++blockNumber;
-    }
+    QStringList types;
+    if (has(producer.writes) && has(consumer.reads))
+        types << "RAW";
+    if (has(producer.reads) && has(consumer.writes))
+        types << "WAR";
+    if (has(producer.writes) && has(consumer.writes))
+        types << "WAW";
+    return types;
 }
 
 } // namespace
@@ -203,60 +193,49 @@ std::string formatAssemblyInstruction(const ICUnit &instruction)
 ListingView buildOriginalListing(const AssembledProgram &original)
 {
     ListingView view;
-    view.text += listingColumn("#", kIndexWidth, true) + " | " +
-                 listingColumn("SOURCE LINE", kSourceLineWidth) + " | " + assemblyCell("ASSEMBLY") + "\n";
-    view.text += separatorLine({kIndexWidth, kSourceLineWidth, kGutterWidth + kAssemblyWidth});
+    view.text += listingColumn("#", kIndexWidth, true) + " | " + assemblyCell("ASSEMBLY") + "\n";
+    view.text += separatorLine({kIndexWidth, kGutterWidth + kAssemblyWidth});
 
     const auto labels = labelsByInstruction(original);
     int blockNumber = kHeaderLineCount;
     for (std::size_t i = 0; i < original.intermediate_code.size(); ++i)
     {
-        appendOriginalLabels(view, labels, i, blockNumber, original);
+        appendLabels(view, labels, i, blockNumber);
         const ICUnit &instruction = original.intermediate_code[i].first;
         view.instructionBlocks.push_back(blockNumber);
         view.text += numberColumn(static_cast<qlonglong>(i + 1), kIndexWidth) + " | " +
-                     numberColumn(instruction.line_number, kSourceLineWidth) + " | " +
                      assemblyCell(QString::fromStdString(formatAssemblyInstruction(instruction))) + "\n";
         view.sourceLineBlocks[static_cast<int>(instruction.line_number)].push_back(blockNumber);
         ++blockNumber;
     }
-    appendOriginalLabels(view, labels, original.intermediate_code.size(), blockNumber, original);
+    appendLabels(view, labels, original.intermediate_code.size(), blockNumber);
     return view;
 }
 
+// The original position and moved/unchanged state are no longer printed as
+// columns: they are shown as row colours and in the expanded details instead.
 ListingView buildOptimizedListing(const AssembledProgram &optimized,
                                   const std::vector<int> &originalPositions)
 {
+    Q_UNUSED(originalPositions);
+
     ListingView view;
-    view.text += listingColumn("#", kIndexWidth, true) + " | " +
-                 listingColumn("ORG #", kOriginalIndexWidth, true) + " | " +
-                 listingColumn("SOURCE LINE", kSourceLineWidth) + " | " +
-                 listingColumn("STATUS", kStatusWidth) + " | " + assemblyCell("ASSEMBLY") + "\n";
-    view.text += separatorLine({kIndexWidth, kOriginalIndexWidth, kSourceLineWidth, kStatusWidth,
-                                kGutterWidth + kAssemblyWidth});
+    view.text += listingColumn("#", kIndexWidth, true) + " | " + assemblyCell("ASSEMBLY") + "\n";
+    view.text += separatorLine({kIndexWidth, kGutterWidth + kAssemblyWidth});
 
     const auto labels = labelsByInstruction(optimized);
     int blockNumber = kHeaderLineCount;
     for (std::size_t i = 0; i < optimized.intermediate_code.size(); ++i)
     {
-        appendOptimizedLabels(view, labels, i, blockNumber, optimized, originalPositions);
+        appendLabels(view, labels, i, blockNumber);
         const ICUnit &instruction = optimized.intermediate_code[i].first;
         view.instructionBlocks.push_back(blockNumber);
-
-        const int originalPosition = i < originalPositions.size() ? originalPositions[i] : -1;
-        const bool moved = originalPosition >= 0 && originalPosition != static_cast<int>(i);
-        const QString status = moved ? "MOVED" : "UNCHANGED";
-
         view.text += numberColumn(static_cast<qlonglong>(i + 1), kIndexWidth) + " | " +
-                     numberColumn(originalPosition >= 0 ? originalPosition + 1 : 0,
-                                  kOriginalIndexWidth) + " | " +
-                     numberColumn(instruction.line_number, kSourceLineWidth) + " | " +
-                     listingColumn(status, kStatusWidth) + " | " +
                      assemblyCell(QString::fromStdString(formatAssemblyInstruction(instruction))) + "\n";
         view.sourceLineBlocks[static_cast<int>(instruction.line_number)].push_back(blockNumber);
         ++blockNumber;
     }
-    appendOptimizedLabels(view, labels, optimized.intermediate_code.size(), blockNumber, optimized, originalPositions);
+    appendLabels(view, labels, optimized.intermediate_code.size(), blockNumber);
     return view;
 }
 
@@ -292,6 +271,86 @@ void InstructionListingTextEdit::selectInstruction(std::optional<std::size_t> in
                         ? layoutDependencyArrows(optimizer::dependenciesOf(m_dependencies, *instruction))
                         : DependencyArrowLayout{};
     viewport()->update();
+
+    if (m_selectionChanged)
+        m_selectionChanged(instruction ? detailsHtml(*instruction) : QString());
+}
+
+void InstructionListingTextEdit::setInstructionDetails(std::vector<InstructionDetail> details)
+{
+    m_details = std::move(details);
+    viewport()->update();
+}
+
+void InstructionListingTextEdit::setSelectionChangedCallback(
+    std::function<void(const QString &)> callback)
+{
+    m_selectionChanged = std::move(callback);
+}
+
+// Rich text for the expandable panel under the listing: what the clicked
+// instruction depends on (or feeds), the hazard type, and the register behind it.
+QString InstructionListingTextEdit::detailsHtml(std::size_t instruction) const
+{
+    if (instruction >= m_details.size())
+        return {};
+
+    const QString muted = palette().color(QPalette::Disabled, QPalette::Text).name();
+    const InstructionDetail &self = m_details[instruction];
+
+    QString movement;
+    if (self.movement < 0)
+        movement = QString(" &middot; <span style='color:%1'>moved earlier</span>")
+                       .arg(kMovedEarlierColor.name());
+    else if (self.movement > 0)
+        movement = QString(" &middot; <span style='color:%1'>moved later</span>")
+                       .arg(kMovedLaterColor.name());
+
+    QString html = QString("<b>#%1</b>&nbsp;&nbsp;%2<br>"
+                           "<span style='color:%3'>Original #%4 &middot; Source line %5</span>%6")
+                       .arg(instruction + 1)
+                       .arg(self.assembly.toHtmlEscaped(), muted)
+                       .arg(self.originalIndex)
+                       .arg(self.sourceLine)
+                       .arg(movement);
+
+    const auto dependencies = optimizer::dependenciesOf(m_dependencies, instruction);
+    if (dependencies.empty())
+        return html + "<p>No register dependencies for this instruction.</p>";
+
+    html += "<table cellspacing='0' cellpadding='4' width='100%'>"
+            "<tr><th align='left'>Type</th><th align='left'>Register</th>"
+            "<th align='left'>Link</th><th align='left'>Instruction</th>"
+            "<th align='left'>Original</th></tr>";
+
+    for (const auto &dependency : dependencies)
+    {
+        if (dependency.producer >= m_details.size() || dependency.consumer >= m_details.size())
+            continue;
+
+        const bool isProducer = dependency.producer == instruction;
+        const std::size_t other = isProducer ? dependency.consumer : dependency.producer;
+        const InstructionDetail &otherDetail = m_details[other];
+
+        const QStringList types = hazardTypes(m_details[dependency.producer],
+                                              m_details[dependency.consumer], dependency.reg);
+        QStringList chips;
+        for (const QString &type : types)
+            chips << typeChip(type);
+
+        const QString reg = QString::fromStdString(dependency.reg);
+        html += QString("<tr><td>%1</td>"
+                        "<td><b><span style='color:%2'>%3</span></b></td>"
+                        "<td>%4 #%5</td><td>%6</td><td>#%7 &middot; line %8</td></tr>")
+                    .arg(chips.isEmpty() ? QString("Register") : chips.join(" + "))
+                    .arg(dependencyColor(reg).name(), reg.toHtmlEscaped())
+                    .arg(isProducer ? QString("&rarr;") : QString("&larr;"))
+                    .arg(other + 1)
+                    .arg(otherDetail.assembly.toHtmlEscaped())
+                    .arg(otherDetail.originalIndex)
+                    .arg(otherDetail.sourceLine);
+    }
+    return html + "</table>";
 }
 
 void InstructionListingTextEdit::mousePressEvent(QMouseEvent *event)
@@ -335,8 +394,32 @@ void InstructionListingTextEdit::paintEvent(QPaintEvent *event)
     QPlainTextEdit::paintEvent(event);
 
     QPainter painter(viewport());
+    paintMovedRows(painter, event->rect());
     paintProducerBoxes(painter, event->rect());
     paintDependencySelection(painter);
+}
+
+void InstructionListingTextEdit::paintMovedRows(QPainter &painter, const QRect &dirtyRect)
+{
+    const std::size_t count = std::min(m_details.size(), m_instructionBlocks.size());
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        const int movement = m_details[i].movement;
+        if (movement == 0)
+            continue;
+        if (!document()->findBlockByNumber(m_instructionBlocks[i]).isValid())
+            continue;
+
+        const QRectF row = rowRect(i);
+        if (row.bottom() < dirtyRect.top() || row.top() > dirtyRect.bottom())
+            continue;
+
+        const QColor &color = movement < 0 ? kMovedEarlierColor : kMovedLaterColor;
+        QColor tint = color;
+        tint.setAlpha(kMovedRowAlpha);
+        painter.fillRect(row, tint);
+        painter.fillRect(QRectF(row.left(), row.top(), kMovedBarWidth, row.height()), color);
+    }
 }
 
 void InstructionListingTextEdit::paintProducerBoxes(QPainter &painter, const QRect &dirtyRect)
