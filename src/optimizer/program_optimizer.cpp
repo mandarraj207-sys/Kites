@@ -15,6 +15,7 @@
 
 #include "assembler/assembler.h"
 #include "custom_pseudo_manager/custom_pseudo_manager.h"
+#include "optimizer/jalr_handler.h"
 #include "optimizer/forwarding_instruction_scheduler.h"
 #include "optimizer/scheduler_core.h"
 
@@ -212,7 +213,23 @@ AssembledProgram assembleEditorSource(const std::string &rawSource)
 ScheduleResult scheduleProgram(const AssembledProgram &program, bool forwardingEnabled)
 {
     const std::vector<ICUnit> instructions = instructionsOf(program);
-    const std::vector<bool> labelBoundary = findLabelBoundaries(program, instructions.size());
+    std::vector<bool> labelBoundary = findLabelBoundaries(program, instructions.size());
+
+    const JalrAnalysis jalr = analyzeJalrTargets(instructions);
+    if (jalr.disableScheduling)
+    {
+        qDebug() << "[JALR] Unresolved indirect target(s):"
+                 << jalr.unresolvedIndirectJumps
+                 << "- preserving original instruction order.";
+        ScheduleResult unchanged;
+        unchanged.instructions = instructions;
+        for (std::size_t i = 0; i < unchanged.instructions.size(); ++i)
+            unchanged.instructions[i].setInstructionIndex(static_cast<unsigned int>(i));
+        return unchanged;
+    }
+
+    for (std::size_t i = 0; i < labelBoundary.size(); ++i)
+        labelBoundary[i] = labelBoundary[i] || jalr.protectedEntry[i];
 
     ScheduleResult result;
     result.instructions.reserve(instructions.size());
@@ -221,6 +238,15 @@ ScheduleResult scheduleProgram(const AssembledProgram &program, bool forwardingE
 
     for (std::size_t i = 0; i < instructions.size(); ++i)
     {
+        // Keep a JALR-sensitive entry at its exact original index.
+        if (jalr.protectedEntry[i])
+        {
+            appendScheduledRegion(result, instructions, regionStart, i, forwardingEnabled);
+            result.instructions.push_back(instructions[i]);
+            regionStart = i + 1;
+            continue;
+        }
+
         // A label starts a new basic block that includes its target instruction.
         if (labelBoundary[i])
         {

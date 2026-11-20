@@ -32,7 +32,7 @@ std::size_t forwardingStalls(const RegionState &state, std::size_t candidate)
             continue;
 
         const std::size_t distance = placed.size() - prior;
-        const std::size_t requiredDistance = (placed[prior].is_load || branchConsumer) ? 2 : 1;
+        const std::size_t requiredDistance = (placed[prior].is_load) ? 2 : 1;
         if (distance < requiredDistance)
             stalls += requiredDistance - distance;
     }
