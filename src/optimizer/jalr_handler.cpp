@@ -7,6 +7,7 @@
 
 namespace Kites::optimizer {
 namespace {
+// Parsing helper: convert an integer-register name to its architectural index.
 std::optional<unsigned> regIndex(const std::string& name) {
     if (name == "zero") return 0;
     if (name == "ra") return 1;
@@ -19,6 +20,7 @@ std::optional<unsigned> regIndex(const std::string& name) {
     } catch (...) { return std::nullopt; }
 }
 
+// Parsing helper: parse an instruction immediate as a signed integer.
 std::optional<std::int64_t> parseImm(const ICUnit& ins) {
     try {
         const std::string text = ins.getImm();
@@ -29,6 +31,7 @@ std::optional<std::int64_t> parseImm(const ICUnit& ins) {
     } catch (...) { return std::nullopt; }
 }
 
+// Classification helper: recognize the conventional jalr x0, x1, 0 return.
 bool isStandardReturn(const ICUnit& ins) {
     const auto rd = ins.getRd();
     const auto rs1 = ins.getRs1();
@@ -38,6 +41,7 @@ bool isStandardReturn(const ICUnit& ins) {
 }
 } // namespace
 
+// Analysis module: identify call continuations and resolvable indirect-jump targets; disable scheduling if safety cannot be established.
 JalrAnalysis analyzeJalrTargets(const std::vector<ICUnit>& instructions) {
     JalrAnalysis result;
     result.protectedEntry.assign(instructions.size(), false);

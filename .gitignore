@@ -44,3 +44,4 @@ cmake-build-*/
 *.tmp
 *.log
 *.bak
+build-optimizer-tests/
