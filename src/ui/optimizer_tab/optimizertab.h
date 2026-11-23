@@ -24,6 +24,7 @@ namespace Kites {
 class EditorTab;
 class InstructionListingHighlighter;
 class InstructionListingTextEdit;
+class MovementLinkOverlay;
 
 class OptimizerTab : public KitesTab
 {
@@ -55,7 +56,8 @@ private:
     void copyOptimizedAssembly();
     InstructionListingTextEdit *createListingPanel(QSplitter *splitter, const QString &title,
                                        const QString &placeholder,
-                                       InstructionListingHighlighter **highlighter);
+                                       InstructionListingHighlighter **highlighter,
+                                       QLabel **stallLabel);
 
     void optimizeCurrentSource();
     void loadOptimizedProgram();
@@ -63,7 +65,10 @@ private:
     bool ensureSuggestionsMatchSelectedModel();
 
     void resetResults();
-    void showListings(const AssembledProgram &original, const AssembledProgram &optimized);
+    void showListings(const AssembledProgram &original, const AssembledProgram &optimized,
+                      bool forwardingEnabled);
+    void setShowStalls(bool show);
+    void clearStallDisplay();
     void handleOptimizationFailure(const QString &reason);
 
     EditorTab *m_editor = nullptr;
@@ -78,6 +83,7 @@ private:
     QLabel *m_benchmarkSummaryLabel = nullptr;
     InstructionListingTextEdit *m_originalOutput = nullptr;
     InstructionListingTextEdit *m_optimizedOutput = nullptr;
+    MovementLinkOverlay *m_movementLinks = nullptr;
     InstructionListingHighlighter *m_originalHighlighter = nullptr;
     InstructionListingHighlighter *m_optimizedHighlighter = nullptr;
     std::map<int, std::vector<int>> m_originalSourceLineBlocks;
@@ -87,6 +93,11 @@ private:
     QPushButton *m_loadButton = nullptr;
     QPushButton *m_benchmarkButton = nullptr;
     QPushButton *m_copyButton = nullptr;
+    QPushButton *m_showStallsButton = nullptr;
+    QLabel *m_originalStallLabel = nullptr;
+    QLabel *m_optimizedStallLabel = nullptr;
+    QLabel *m_stallLegend = nullptr;
+    std::vector<std::pair<int, std::string>> m_lastExecutionHighlights;
 
     std::optional<AssembledProgram> m_originalProgram;
     std::optional<AssembledProgram> m_optimizedProgram;

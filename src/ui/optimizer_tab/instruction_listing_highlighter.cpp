@@ -22,6 +22,12 @@ const QRegularExpression &registerRegex()
 
 } // namespace
 
+bool isStallRow(const QString &text)
+{
+    const int separator = text.lastIndexOf(QStringLiteral(" | "));
+    return separator >= 0 && text.mid(separator + 3).trimmed().startsWith(kStallRowMarker);
+}
+
 // Each register keeps the same colour everywhere in the listing.
 QColor dependencyColor(const QString &reg)
 {
@@ -50,6 +56,15 @@ void InstructionListingHighlighter::setDependencyRegisters(
 
 void InstructionListingHighlighter::highlightBlock(const QString &text)
 {
+    // Stall rows are not instructions: muted italic text, no opcode/register colouring.
+    if (isStallRow(text))
+    {
+        QTextCharFormat stallFormat;
+        stallFormat.setForeground(QColor(224, 110, 110));
+        stallFormat.setFontItalic(true);
+        setFormat(0, text.length(), stallFormat);
+        return;
+    }
 
     QTextCharFormat opcodeFormat;
     opcodeFormat.setForeground(QColor("#569CD6"));

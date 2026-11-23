@@ -5,6 +5,7 @@
 
 namespace Kites::optimizer
 {
+// Public API: schedule one basic block using the H_F forwarding-aware policy.
 ScheduleResult scheduleForwardingBasicBlock(
     const std::vector<ICUnit>& basic_block);
 }

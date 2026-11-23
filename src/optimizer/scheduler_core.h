@@ -14,6 +14,7 @@
 
 namespace Kites::optimizer::detail
 {
+// Instruction metadata model: supported status, load/store flags, and register read/write sets.
 struct InstructionInfo
 {
     bool supported = false;
@@ -35,6 +36,7 @@ bool hasDependency(const InstructionInfo &a, const InstructionInfo &b);
 bool hasRAWDependency(const InstructionInfo &producer, const InstructionInfo &consumer);
 
 /** Read-only view of a scheduling region while it is being ordered. */
+// Scheduler state view: block, active region, dependency metadata, and already placed instructions.
 struct RegionState
 {
     const std::vector<ICUnit> &block;
@@ -49,12 +51,14 @@ struct RegionState
 };
 
 /** Lower stalls win, then higher priority, then longer critical path. */
+// Candidate score model: stall cost and policy-specific priority.
 struct CandidateScore
 {
     std::size_t stalls = 0;
     std::size_t priority = 0;
 };
 
+// Policy interface: H_NF/H_F scoring callbacks plus optional debug tracing hooks.
 struct SchedulingPolicy
 {
     std::function<CandidateScore(const RegionState &, std::size_t)> score;
@@ -65,8 +69,10 @@ struct SchedulingPolicy
 };
 
 /** Splits the block into regions and reorders each one using the policy. */
+// API: shared scheduling engine used by H_NF and H_F.
 ScheduleResult scheduleBlock(const std::vector<ICUnit> &block, const SchedulingPolicy &policy);
 
+// API: update instruction indices after reordering.
 void updateIndicesIfMoved(ScheduleResult &result, const std::vector<ICUnit> &original);
 
 } // namespace Kites::optimizer::detail

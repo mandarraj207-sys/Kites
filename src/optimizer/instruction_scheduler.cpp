@@ -20,6 +20,7 @@ namespace
 using detail::CandidateScore;
 using detail::RegionState;
 
+// Debugging helper: format an instruction for optional trace output.
 QString instructionText(const RegionState &state, std::size_t candidate)
 {
     std::ostringstream text;
@@ -28,6 +29,7 @@ QString instructionText(const RegionState &state, std::size_t candidate)
 }
 
 /** Without forwarding, a RAW result is usable 2 slots (adjacent) or 1 slot (gap of one) late. */
+// Scoring module: estimate RAW stalls when forwarding is disabled.
 std::size_t noForwardingStalls(const RegionState &state, std::size_t candidate)
 {
     const auto &placed = state.placed;
@@ -45,6 +47,7 @@ std::size_t noForwardingStalls(const RegionState &state, std::size_t candidate)
  * sit between them and the fixed branch. Critical-path length alone cannot
  * tell them apart, since the branch depends on every earlier node.
  */
+// Scoring module: prioritize producers of branch operands to create useful spacing before the branch.
 std::size_t branchOperandPriority(const RegionState &state, std::size_t candidate)
 {
     std::size_t priority = 0;
@@ -59,16 +62,19 @@ std::size_t branchOperandPriority(const RegionState &state, std::size_t candidat
     return priority;
 }
 
+// Policy module: combine no-forwarding stall cost and branch-operand priority.
 CandidateScore scoreNoForwarding(const RegionState &state, std::size_t candidate)
 {
     return {noForwardingStalls(state, candidate), branchOperandPriority(state, candidate)};
 }
 
+// DEBUG ONLY: log each candidate considered by H_NF; disabled during normal runs.
 void traceCandidate(const RegionState &state, std::size_t candidate)
 {
     qDebug() << "[H_NF] Candidate:" << instructionText(state, candidate);
 }
 
+// DEBUG ONLY: log candidate score and critical-path value; disabled during normal runs.
 void traceScore(const RegionState &state, std::size_t candidate, const CandidateScore &score)
 {
     qDebug() << "[H_NF] Candidate:" << instructionText(state, candidate)
@@ -78,17 +84,25 @@ void traceScore(const RegionState &state, std::size_t candidate, const Candidate
 
 } // namespace
 
+// Public scheduler module: schedule one block using the H_NF no-forwarding policy.
 ScheduleResult scheduleBasicBlock(const std::vector<ICUnit> &basic_block)
 {
-    qDebug() << "[H_NF] Received block size:" << basic_block.size();
+    // DEBUG ONLY: block-size diagnostic for investigating unexpectedly large scheduling regions.
+    // Keep disabled during normal runs to avoid unnecessary Qt logging overhead.
+    // qDebug() << "[H_NF] Received block size:" << basic_block.size();
 
     detail::SchedulingPolicy policy;
     policy.score = scoreNoForwarding;
-    policy.onCandidate = traceCandidate;
-    policy.onScored = traceScore;
+
+    // DEBUG ONLY: candidate/scoring traces expose scheduler decisions.
+    // These callbacks run in the scheduling hot loop, so keep them disabled normally.
+    // policy.onCandidate = traceCandidate;
+    // policy.onScored = traceScore;
+
     return detail::scheduleBlock(basic_block, policy);
 }
 
+// Program partitioning module: split at branch targets/control-flow boundaries, then schedule blocks independently.
 ScheduleResult scheduleProgramBlocks(const std::vector<ICUnit> &program,
                                      const std::vector<std::size_t> &branch_target_indices)
 {
@@ -124,6 +138,7 @@ ScheduleResult scheduleProgramBlocks(const std::vector<ICUnit> &program,
     return result;
 }
 
+// Compatibility wrapper: preserve the older API name while delegating to H_NF scheduling.
 ScheduleResult scheduleLoadUseHazards(const std::vector<ICUnit> &basic_block)
 {
     return scheduleBasicBlock(basic_block);

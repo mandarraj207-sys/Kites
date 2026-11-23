@@ -36,7 +36,7 @@ TEST(InstructionSchedulerTest, SchedulesDependenciesAndPreservesInstructions)
     EXPECT_EQ(result.instructions[0].getOpcode(), "addi");
     EXPECT_EQ(result.instructions[1].getOpcode(), "addi");
     EXPECT_EQ(result.instructions[2].getOpcode(), "add");
-    EXPECT_EQ(result.moved_instructions, 1u);
+    EXPECT_EQ(result.moved_instructions, 2u);
 
     // The input must remain unchanged.
     EXPECT_EQ(alu_block[1].getOpcode(), "add");
@@ -77,14 +77,40 @@ TEST(InstructionSchedulerTest, PreservesRegisterDependencies)
     EXPECT_EQ(scheduleBasicBlock(raw_block).moved_instructions, 0u);
 }
 
-TEST(InstructionSchedulerTest, KeepsMemoryOperationsConservative)
+TEST(InstructionSchedulerTest, PreservesLoadOrderWhileFillingLoadUseGap)
 {
     std::vector<ICUnit> block = {
         makeInstruction(0, "ld", "x1", "x2"),
         makeInstruction(1, "add", "x3", "x1", "x4"),
         makeInstruction(2, "lw", "x5", "x6")};
 
-    EXPECT_EQ(scheduleBasicBlock(block).moved_instructions, 0u);
+    const auto result = scheduleBasicBlock(block);
+    ASSERT_EQ(result.instructions.size(), block.size());
+    // Loads retain their relative order; the independent load may fill the
+    // H_NF load-use gap. Assumes ordinary side-effect-free RAM loads.
+    EXPECT_EQ(result.instructions[0].getOpcode(), "ld");
+    EXPECT_EQ(result.instructions[1].getOpcode(), "lw");
+    EXPECT_EQ(result.instructions[2].getOpcode(), "add");
+}
+
+
+TEST(InstructionSchedulerTest, PreservesSecondSourceDependencyOfFPCompare)
+{
+    const std::vector<ICUnit> block = {
+        makeInstruction(0, "fadd.s", "f3", "f4", "f5"),
+        makeInstruction(1, "feq.s", "x1", "f2", "f3"),
+        makeInstruction(2, "addi", "x6", "x7")};
+
+    const auto result = scheduleBasicBlock(block);
+    ASSERT_EQ(result.instructions.size(), block.size());
+    std::size_t producer = result.instructions.size();
+    std::size_t compare = result.instructions.size();
+    for (std::size_t i = 0; i < result.instructions.size(); ++i)
+    {
+        if (result.instructions[i].getRd() == "f3") producer = i;
+        if (result.instructions[i].getOpcode() == "feq.s") compare = i;
+    }
+    EXPECT_LT(producer, compare);
 }
 
 TEST(InstructionSchedulerTest, CompatibilityWrapperUsesBasicBlockScheduler)
@@ -215,4 +241,41 @@ TEST(InstructionSchedulerTest, KeepsAuipcAtItsOriginalSlot)
     ASSERT_EQ(result.instructions.size(), block.size());
     EXPECT_EQ(result.instructions[1].getOpcode(), "auipc");
     EXPECT_EQ(result.instructions[1].getRd(), "x5");
+}
+
+
+TEST(InstructionSchedulerTest, SchedulesFloatingPointInstructionsWithTheSamePolicy)
+{
+    std::vector<ICUnit> block = {
+        makeInstruction(0, "flw", "f1", "x2"),
+        makeInstruction(1, "fadd.s", "f3", "f1", "f4"),
+        makeInstruction(2, "fsub.s", "f5", "f6", "f7")};
+
+    const auto result = scheduleBasicBlock(block);
+    ASSERT_EQ(result.instructions.size(), block.size());
+    EXPECT_EQ(result.instructions[0].getOpcode(), "flw");
+    EXPECT_EQ(result.instructions[1].getOpcode(), "fsub.s");
+    EXPECT_EQ(result.instructions[2].getOpcode(), "fadd.s");
+}
+
+TEST(InstructionSchedulerTest, TracksThirdFloatingPointSourceOperand)
+{
+    ICUnit fused = makeInstruction(1, "fmadd.d", "f4", "f1", "f2");
+    fused.setRs3("f3");
+    std::vector<ICUnit> block = {
+        makeInstruction(0, "fadd.d", "f3", "f5", "f6"),
+        fused,
+        makeInstruction(2, "fsub.d", "f7", "f8", "f9")};
+
+    const auto result = scheduleBasicBlock(block);
+    ASSERT_EQ(result.instructions.size(), block.size());
+
+    std::size_t producer = result.instructions.size();
+    std::size_t consumer = result.instructions.size();
+    for (std::size_t i = 0; i < result.instructions.size(); ++i)
+    {
+        if (result.instructions[i].getRd() == "f3") producer = i;
+        if (result.instructions[i].getOpcode() == "fmadd.d") consumer = i;
+    }
+    EXPECT_LT(producer, consumer);
 }

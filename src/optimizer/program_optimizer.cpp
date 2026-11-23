@@ -8,6 +8,7 @@
 #include <QString>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -23,6 +24,7 @@ namespace Kites::optimizer
 {
 namespace
 {
+// Assembly input module: write expanded assembly text to a temporary file for the assembler.
 void writeTemporarySource(const std::filesystem::path &path, const std::string &source)
 {
     std::ofstream out(path);
@@ -38,6 +40,7 @@ void writeTemporarySource(const std::filesystem::path &path, const std::string &
  * Maps expanded pseudo-instruction lines back to the user's source line, so a
  * pseudo that expands to several instructions highlights one editor line.
  */
+// Source mapping module: map expanded pseudo-instruction lines back to editor source lines.
 void remapToOriginalLines(AssembledProgram &program,
                           const std::vector<int> &expandedLineToOriginalLine)
 {
@@ -61,6 +64,7 @@ void remapToOriginalLines(AssembledProgram &program,
     }
 }
 
+// Extraction helper: copy ICUnit objects from the assembled-program entries.
 std::vector<ICUnit> instructionsOf(const AssembledProgram &program)
 {
     std::vector<ICUnit> instructions;
@@ -70,6 +74,7 @@ std::vector<ICUnit> instructionsOf(const AssembledProgram &program)
     return instructions;
 }
 
+// Scheduling adapter: run H_F or H_NF on one region and append the scheduled instructions.
 void appendScheduledRegion(ScheduleResult &result, const std::vector<ICUnit> &instructions,
                            std::size_t begin, std::size_t end, bool forwardingEnabled)
 {
@@ -82,14 +87,18 @@ void appendScheduledRegion(ScheduleResult &result, const std::vector<ICUnit> &in
     qDebug() << "[Optimizer] Forwarding enabled:" << forwardingEnabled;
     qDebug() << "[Optimizer] Scheduler selected:" << (forwardingEnabled ? "H_F" : "H_NF");
 
-    const auto regionResult = forwardingEnabled ? scheduleForwardingBasicBlock(region)
-                                                : scheduleBasicBlock(region);
+    auto regionResult = forwardingEnabled ? scheduleForwardingBasicBlock(region)
+                                           : scheduleBasicBlock(region);
 
     result.moved_instructions += regionResult.moved_instructions;
-    result.instructions.insert(result.instructions.end(), regionResult.instructions.begin(),
-                               regionResult.instructions.end());
+
+    result.instructions.insert(
+        result.instructions.end(),
+        std::make_move_iterator(regionResult.instructions.begin()),
+        std::make_move_iterator(regionResult.instructions.end()));
 }
 
+// DEBUG ONLY: dump a complete instruction sequence for diagnosing unexpected reorderings.
 void printInstructions(const std::vector<ICUnit> &instructions, const char *title)
 {
     qDebug().noquote() << "\n====" << title << "====";
@@ -105,14 +114,19 @@ void printInstructions(const std::vector<ICUnit> &instructions, const char *titl
     }
 }
 
+// Debugging module: report schedule statistics; full instruction dumps are disabled by default.
 void logSchedule(std::size_t originalCount, const ScheduleResult &result)
 {
-    printInstructions(result.instructions, "AFTER SCHEDULING");
+    // DEBUG ONLY: full instruction dumps help diagnose incorrect reorderings.
+    // Keep disabled normally because formatting/printing every instruction is expensive.
+    // printInstructions(result.instructions, "AFTER SCHEDULING");
 
     qDebug() << "Original instruction count:" << originalCount;
     qDebug() << "Scheduled instruction count:" << result.instructions.size();
     qDebug() << "Instructions moved:" << result.moved_instructions;
 
+    // DEBUG ONLY: per-instruction schedule trace; uncomment when investigating a bad ordering.
+    /*
     for (std::size_t i = 0; i < result.instructions.size(); ++i)
     {
         std::ostringstream line;
@@ -120,8 +134,10 @@ void logSchedule(std::size_t originalCount, const ScheduleResult &result)
 
         qDebug() << "Scheduled" << i << ":" << QString::fromStdString(line.str());
     }
+    */
 }
 
+// Matching helper: compare instruction fields while ignoring its rewritten instruction index.
 bool sameInstruction(const ICUnit &a, const ICUnit &b)
 {
     return a.line_number == b.line_number && a.opcode == b.opcode && a.rd == b.rd &&
@@ -130,6 +146,7 @@ bool sameInstruction(const ICUnit &a, const ICUnit &b)
 }
 
 /** Finds and claims the first unused entry equal to `scheduled`, so repeats match one-to-one. */
+// Matching helper: claim one unused original entry; repeated identical instructions are matched one-to-one.
 std::optional<std::size_t> claimMatchingEntry(const AssembledProgram &program,
                                               std::vector<bool> &used, const ICUnit &scheduled)
 {
@@ -147,6 +164,7 @@ std::optional<std::size_t> claimMatchingEntry(const AssembledProgram &program,
     return std::nullopt;
 }
 
+// Metadata module: rebuild instruction indices, line mappings, and disassembly text after reordering.
 void rebuildIndexMetadata(AssembledProgram &program)
 {
     program.line_number_instruction_number_mapping.clear();
@@ -180,6 +198,7 @@ void rebuildIndexMetadata(AssembledProgram &program)
  * Marks instructions that code labels point at. A symbol address is in bytes
  * and KITES stores one 32-bit instruction per entry, so address / 4 is the index.
  */
+// Control-flow module: mark instruction indices targeted by code labels.
 std::vector<bool> findLabelBoundaries(const AssembledProgram &program, std::size_t instructionCount)
 {
     std::vector<bool> labelBoundary(instructionCount, false);
@@ -196,6 +215,7 @@ std::vector<bool> findLabelBoundaries(const AssembledProgram &program, std::size
     return labelBoundary;
 }
 
+// Assembly module: expand custom pseudos, assemble source, and restore editor line mappings.
 AssembledProgram assembleEditorSource(const std::string &rawSource)
 {
     std::vector<int> expandedLineToOriginalLine;
@@ -210,6 +230,7 @@ AssembledProgram assembleEditorSource(const std::string &rawSource)
     return program;
 }
 
+// Main optimization module: partition safe regions, schedule them, and preserve JALR-sensitive entries.
 ScheduleResult scheduleProgram(const AssembledProgram &program, bool forwardingEnabled)
 {
     const std::vector<ICUnit> instructions = instructionsOf(program);
@@ -280,6 +301,7 @@ ScheduleResult scheduleProgram(const AssembledProgram &program, bool forwardingE
     return result;
 }
 
+// Reconstruction module: reorder assembled entries, rebuild metadata, and regenerate machine code.
 AssembledProgram buildOptimizedProgram(const AssembledProgram &original,
                                        const ScheduleResult &schedule)
 {
@@ -309,6 +331,7 @@ AssembledProgram buildOptimizedProgram(const AssembledProgram &original,
     return program;
 }
 
+// Debug/visualization module: map optimized instructions to original positions (-1 means unmatched).
 std::vector<int> originalPositions(const AssembledProgram &original,
                                    const AssembledProgram &optimized)
 {

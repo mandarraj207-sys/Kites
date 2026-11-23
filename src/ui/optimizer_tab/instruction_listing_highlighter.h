@@ -28,6 +28,12 @@ struct DependencySpan
     bool write = false;
 };
 
+/** Text every stall (pipeline bubble) row starts with, right after the " | " column separator. */
+inline const QString kStallRowMarker = QStringLiteral("-- stall");
+
+/** True for the rows the listing inserts for pipeline bubbles. */
+bool isStallRow(const QString &text);
+
 /** The color a register keeps everywhere it appears in a dependency (underline, arrows). */
 QColor dependencyColor(const QString &reg);
 

@@ -14,6 +14,7 @@
 namespace Kites::optimizer
 {
 /** `consumer` reads `reg` as last written by `producer` (both are instruction indices). */
+// Data model: one producer-to-consumer dependency on a register.
 struct RegisterDependency
 {
     std::size_t producer = 0;
@@ -26,9 +27,11 @@ struct RegisterDependency
  * instruction that wrote it. Labels and control flow end a straight-line
  * segment, and instructions the scheduler does not model are barriers.
  */
+// API: construct the program's tracked register dependencies.
 std::vector<RegisterDependency> findRegisterDependencies(const AssembledProgram &program);
 
 /** Dependencies in which `instruction` is the producer or the consumer. */
+// API: retrieve dependencies involving one instruction index.
 std::vector<RegisterDependency> dependenciesOf(const std::vector<RegisterDependency> &all,
                                                std::size_t instruction);
 

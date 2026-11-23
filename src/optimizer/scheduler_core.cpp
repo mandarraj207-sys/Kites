@@ -12,6 +12,7 @@ namespace Kites::optimizer::detail
 {
 namespace
 {
+// Instruction classification module: opcode groups used to decode register access and control-flow behavior.
 using OpcodeSet = std::unordered_set<std::string>;
 using DependencyGraph = std::vector<std::vector<bool>>;
 
@@ -22,6 +23,29 @@ const OpcodeSet kRTypeInteger = {
 const OpcodeSet kITypeInteger = {
     "addi", "slti", "sltiu", "xori", "ori", "andi", "slli", "srli", "srai",
     "addiw", "slliw", "srliw", "sraiw"};
+// Floating-point instructions supported by the assembler. Register names are kept
+// as-is ("fN" versus "xN"), so integer and FP register dependencies stay distinct.
+const OpcodeSet kFPBinary = {
+    "fadd.s", "fsub.s", "fmul.s", "fdiv.s", "fadd.d", "fsub.d", "fmul.d", "fdiv.d",
+    "fsgnj.s", "fsgnjn.s", "fsgnjx.s", "fmin.s", "fmax.s",
+    "fsgnj.d", "fsgnjn.d", "fsgnjx.d", "fmin.d", "fmax.d"};
+const OpcodeSet kFPCompare = {"feq.s", "flt.s", "fle.s", "feq.d", "flt.d", "fle.d"};
+const OpcodeSet kFPUnary = {"fsqrt.s", "fsqrt.d"};
+const OpcodeSet kFPFused = {
+    "fmadd.s", "fmsub.s", "fnmsub.s", "fnmadd.s",
+    "fmadd.d", "fmsub.d", "fnmsub.d", "fnmadd.d"};
+const OpcodeSet kFPLoads = {"flw", "fld"};
+const OpcodeSet kFPStores = {"fsw", "fsd"};
+const OpcodeSet kFPClass = {"fclass.s", "fclass.d"};
+const OpcodeSet kFPMoveToGPR = {"fmv.x.w", "fmv.x.d"};
+const OpcodeSet kFPMoveToFPR = {"fmv.w.x", "fmv.d.x"};
+const OpcodeSet kFPCvtToGPR = {
+    "fcvt.w.s", "fcvt.wu.s", "fcvt.l.s", "fcvt.lu.s",
+    "fcvt.w.d", "fcvt.wu.d", "fcvt.l.d", "fcvt.lu.d"};
+const OpcodeSet kFPCvtToFPR = {
+    "fcvt.s.w", "fcvt.s.wu", "fcvt.s.l", "fcvt.s.lu",
+    "fcvt.d.w", "fcvt.d.wu", "fcvt.d.l", "fcvt.d.lu",
+    "fcvt.s.d", "fcvt.d.s"};
 const OpcodeSet kLoads = {"lb", "lh", "lw", "ld", "lbu", "lhu", "lwu"};
 const OpcodeSet kStores = {"sb", "sh", "sw", "sd"};
 const OpcodeSet kConditionalBranches = {
@@ -31,21 +55,25 @@ const OpcodeSet kControlFlow = {
     "jal", "jalr", "j", "jr", "c.j", "c.jal", "c.jr", "c.jalr",
     "ecall", "ebreak", "c.ebreak", "mret", "sret", "uret", "dret"};
 
+// Opcode helper: test membership in a supported opcode group.
 bool contains(const OpcodeSet &set, const std::string &value)
 {
     return set.find(value) != set.end();
 }
 
+// Register metadata helper: record a non-empty source register.
 void addRead(std::vector<std::string> &reads, const std::string &reg)
 {
     if (!reg.empty()) reads.push_back(reg);
 }
 
+// Register metadata helper: record a non-empty destination register, excluding x0.
 void addWrite(std::vector<std::string> &writes, const std::string &reg)
 {
     if (!reg.empty() && reg != "x0") writes.push_back(reg);
 }
 
+// Dependency helper: test whether two register sets overlap.
 bool intersects(const std::vector<std::string> &a, const std::vector<std::string> &b)
 {
     for (const auto &reg : a)
@@ -53,6 +81,7 @@ bool intersects(const std::vector<std::string> &a, const std::vector<std::string
     return false;
 }
 
+// Barrier helper: only supported non-store instructions are eligible for reordering.
 bool isSchedulable(const InstructionInfo &info)
 {
     return info.supported && !info.is_store;
@@ -63,6 +92,7 @@ bool isAuipc(const ICUnit &unit)
     return unit.getOpcode() == "auipc";
 }
 
+// Decoding module: generate register-access metadata for every instruction in a block.
 std::vector<InstructionInfo> describeAll(const std::vector<ICUnit> &block)
 {
     std::vector<InstructionInfo> infos;
@@ -76,6 +106,7 @@ std::vector<InstructionInfo> describeAll(const std::vector<ICUnit> &block)
  * Returns the end of the schedulable run starting at `start`. A conditional
  * branch is included as the fixed final instruction of its region.
  */
+// Region detection module: find a schedulable run; a conditional branch is included only as its fixed final node.
 std::size_t findRegionEnd(const std::vector<ICUnit> &block,
                           const std::vector<InstructionInfo> &infos, std::size_t start)
 {
@@ -96,6 +127,7 @@ std::size_t findRegionEnd(const std::vector<ICUnit> &block,
  * Edges point forward in the original order and preserve every register
  * dependency, the order of loads (no alias analysis), and the terminal branch.
  */
+// Dependency graph module: preserve RAW/WAR/WAW hazards, load order, and the terminal branch.
 DependencyGraph buildDependencyGraph(const std::vector<ICUnit> &block, std::size_t start,
                                      const std::vector<InstructionInfo> &nodes)
 {
@@ -114,6 +146,7 @@ DependencyGraph buildDependencyGraph(const std::vector<ICUnit> &block, std::size
     return edges;
 }
 
+// Critical-path module: calculate longest downstream dependency-chain lengths.
 std::vector<std::size_t> computeCriticalPaths(const DependencyGraph &edges)
 {
     const std::size_t count = edges.size();
@@ -134,6 +167,7 @@ std::vector<std::size_t> computeCriticalPaths(const DependencyGraph &edges)
  * AUIPC is PC-relative: it stays in its original output slot, and nothing
  * else may take that slot or be replaced by it.
  */
+// PC-relative safety module: keep AUIPC in its original output slot.
 bool violatesAuipcPin(const RegionState &state, std::size_t outputSlot, std::size_t candidate)
 {
     const bool slotIsAuipc = isAuipc(state.instruction(outputSlot));
@@ -141,14 +175,9 @@ bool violatesAuipcPin(const RegionState &state, std::size_t outputSlot, std::siz
     return (slotIsAuipc && candidate != outputSlot) || (!slotIsAuipc && candidateIsAuipc);
 }
 
-bool isReady(const DependencyGraph &edges, const std::vector<bool> &scheduled,
-             std::size_t candidate)
-{
-    for (std::size_t pred = 0; pred < candidate; ++pred)
-        if (edges[pred][candidate] && !scheduled[pred]) return false;
-    return true;
-}
+// Readiness is maintained incrementally using remainingPredecessors.
 
+// Candidate selection module: apply the existing score, priority, and critical-path tie-breaking.
 bool isBetter(const CandidateScore &score, std::size_t path, const CandidateScore &best,
               std::size_t bestPath)
 {
@@ -158,6 +187,7 @@ bool isBetter(const CandidateScore &score, std::size_t path, const CandidateScor
 }
 
 /** Returns the new region order, or a shorter vector if the graph was inconsistent. */
+// Core scheduling module: select ready instructions and update predecessor counts incrementally.
 std::vector<std::size_t> orderRegion(const std::vector<ICUnit> &block, std::size_t start,
                                      const std::vector<InstructionInfo> &nodes,
                                      const SchedulingPolicy &policy)
@@ -165,6 +195,18 @@ std::vector<std::size_t> orderRegion(const std::vector<ICUnit> &block, std::size
     const std::size_t count = nodes.size();
     const DependencyGraph edges = buildDependencyGraph(block, start, nodes);
     const std::vector<std::size_t> criticalPath = computeCriticalPaths(edges);
+
+    // Count unscheduled predecessors for every instruction.
+    std::vector<std::size_t> remainingPredecessors(count, 0);
+
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        for (std::size_t j = i + 1; j < count; ++j)
+        {
+            if (edges[i][j])
+                ++remainingPredecessors[j];
+        }
+    }
 
     std::vector<bool> scheduled(count, false);
     std::vector<std::size_t> order;
@@ -191,7 +233,7 @@ std::vector<std::size_t> orderRegion(const std::vector<ICUnit> &block, std::size
             if (violatesAuipcPin(state, order.size(), candidate))
                 continue;
 
-            if (!isReady(edges, scheduled, candidate))
+            if (remainingPredecessors[candidate] != 0)
                 continue;
 
             const CandidateScore score = policy.score(state, candidate);
@@ -214,10 +256,19 @@ std::vector<std::size_t> orderRegion(const std::vector<ICUnit> &block, std::size
         scheduled[best] = true;
         order.push_back(best);
         placed.push_back(nodes[best]);
+
+        // Scheduling this instruction makes its successors one dependency
+        // closer to becoming ready.
+        for (std::size_t successor = best + 1; successor < count; ++successor)
+        {
+            if (edges[best][successor])
+                --remainingPredecessors[successor];
+        }
     }
     return order;
 }
 
+// Reordering module: apply the selected node order and count moved instructions.
 void applyOrder(ScheduleResult &result, const std::vector<ICUnit> &block, std::size_t start,
                 const std::vector<std::size_t> &order)
 {
@@ -232,6 +283,7 @@ void applyOrder(ScheduleResult &result, const std::vector<ICUnit> &block, std::s
 
 } // namespace
 
+// Instruction decoder module: classify an instruction and record its register reads/writes.
 InstructionInfo describe(const ICUnit &unit)
 {
     InstructionInfo info;
@@ -239,6 +291,7 @@ InstructionInfo describe(const ICUnit &unit)
     const std::string rd = unit.getRd();
     const std::string rs1 = unit.getRs1();
     const std::string rs2 = unit.getRs2();
+    const std::string rs3 = unit.getRs3();
 
     // For a branch, getLabel() is its TARGET label, not a label attached to
     // this instruction, so branches are recognized before the label barrier.
@@ -266,6 +319,70 @@ InstructionInfo describe(const ICUnit &unit)
         addRead(info.reads, rs1);
         addWrite(info.writes, rd);
     }
+    else if (contains(kFPLoads, op))
+    {
+        info.supported = true;
+        info.is_load = true;
+        addRead(info.reads, rs1); // integer base address
+        addWrite(info.writes, rd); // floating-point destination
+    }
+    else if (contains(kFPStores, op))
+    {
+        info.supported = true;
+        info.is_store = true;
+        addRead(info.reads, rs1); // integer base address
+        addRead(info.reads, rd);  // floating-point value being stored
+    }
+    else if (contains(kFPFused, op))
+    {
+        info.supported = true;
+        addRead(info.reads, rs1);
+        addRead(info.reads, rs2);
+        addRead(info.reads, rs3);
+        addWrite(info.writes, rd);
+    }
+    else if (contains(kFPBinary, op))
+    {
+        info.supported = true;
+        addRead(info.reads, rs1);
+        addRead(info.reads, rs2);
+        addWrite(info.writes, rd);
+    }
+    else if (contains(kFPUnary, op))
+    {
+        info.supported = true;
+        addRead(info.reads, rs1);
+        addWrite(info.writes, rd);
+    }
+    else if (contains(kFPCompare, op))
+    {
+        // FP comparisons consume TWO floating-point operands and produce
+        // an integer-register result. Omitting rs2 can let the scheduler
+        // move a comparison before the instruction that produces rs2.
+        info.supported = true;
+        addRead(info.reads, rs1);
+        addRead(info.reads, rs2);
+        addWrite(info.writes, rd);
+    }
+    else if (contains(kFPClass, op) || contains(kFPMoveToGPR, op) ||
+             contains(kFPCvtToGPR, op))
+    {
+        info.supported = true;
+        addRead(info.reads, rs1);
+        addWrite(info.writes, rd); // unary FP-to-GPR operation
+    }
+    else if (contains(kFPMoveToFPR, op))
+    {
+        info.supported = true;
+        addRead(info.reads, rs1); // integer source
+        addWrite(info.writes, rd); // floating-point destination
+    }
+    else if (contains(kFPCvtToFPR, op))
+    {
+        info.supported = true;
+        addRead(info.reads, rs1);
+        addWrite(info.writes, rd);
+    }
     else if (contains(kLoads, op))
     {
         info.supported = true;
@@ -288,27 +405,32 @@ InstructionInfo describe(const ICUnit &unit)
     return info;
 }
 
+// Control-flow helper: identify conditional branch instructions.
 bool isConditionalBranch(const ICUnit &unit)
 {
     return contains(kConditionalBranches, unit.getOpcode());
 }
 
+// Control-flow helper: identify branches, jumps, traps, and returns.
 bool isControlFlow(const ICUnit &unit)
 {
     return contains(kControlFlow, unit.getOpcode());
 }
 
+// Dependency helper: detect RAW, WAR, or WAW hazards.
 bool hasDependency(const InstructionInfo &a, const InstructionInfo &b)
 {
     return intersects(a.writes, b.reads) || intersects(a.reads, b.writes) ||
            intersects(a.writes, b.writes);
 }
 
+// Timing helper: detect RAW dependencies that impose result-availability delays.
 bool hasRAWDependency(const InstructionInfo &producer, const InstructionInfo &consumer)
 {
     return intersects(producer.writes, consumer.reads);
 }
 
+// Shared scheduling module: split at barriers and schedule each valid region with the supplied H_NF/H_F policy.
 ScheduleResult scheduleBlock(const std::vector<ICUnit> &block, const SchedulingPolicy &policy)
 {
     ScheduleResult result;
@@ -351,6 +473,7 @@ ScheduleResult scheduleBlock(const std::vector<ICUnit> &block, const SchedulingP
     return result;
 }
 
+// Metadata helper: refresh instruction indices after a reorder.
 void updateIndicesIfMoved(ScheduleResult &result, const std::vector<ICUnit> &original)
 {
     if (result.moved_instructions == 0 || original.empty()) return;

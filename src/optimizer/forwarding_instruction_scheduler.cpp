@@ -20,6 +20,7 @@ using detail::RegionState;
  * Forwarding removes ordinary ALU-to-ALU RAW stalls. A load feeding its
  * consumer, or any producer feeding a branch, still needs one slot of distance.
  */
+// Scoring module: estimate RAW stalls under forwarding, including load-use and branch delays.
 std::size_t forwardingStalls(const RegionState &state, std::size_t candidate)
 {
     const bool branchConsumer = detail::isConditionalBranch(state.instruction(candidate));
@@ -40,6 +41,7 @@ std::size_t forwardingStalls(const RegionState &state, std::size_t candidate)
 }
 
 /** Prefers instructions that can fill a latency slot before a branch or load consumer. */
+// Scoring module: reward candidates that fill latency slots before dependent consumers.
 std::size_t latencyFill(const RegionState &state, std::size_t candidate)
 {
     std::size_t fill = 0;
@@ -56,6 +58,7 @@ std::size_t latencyFill(const RegionState &state, std::size_t candidate)
     return fill;
 }
 
+// Policy module: combine forwarding stall cost with latency-fill priority.
 CandidateScore scoreForwarding(const RegionState &state, std::size_t candidate)
 {
     return {forwardingStalls(state, candidate), latencyFill(state, candidate)};
@@ -63,6 +66,7 @@ CandidateScore scoreForwarding(const RegionState &state, std::size_t candidate)
 
 } // namespace
 
+// Public scheduler module: schedule one block with the H_F forwarding-aware policy.
 ScheduleResult scheduleForwardingBasicBlock(const std::vector<ICUnit> &block)
 {
     detail::SchedulingPolicy policy;

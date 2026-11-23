@@ -3,9 +3,11 @@
 #include "optimizer/dependency_graph.h"
 #include "optimizer/program_optimizer.h"
 #include "optimizer/scheduler_core.h"
+#include "optimizer/stall_model.h"
 #include "ui/editor_tab/editortab.h"
 #include "ui/optimizer_tab/instruction_listing.h"
 #include "ui/optimizer_tab/instruction_listing_highlighter.h"
+#include "ui/optimizer_tab/movement_link_overlay.h"
 
 #include <QComboBox>
 #include <QApplication>
@@ -21,6 +23,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSplitter>
 #include <QTabWidget>
 #include <QWidget>
@@ -186,6 +189,14 @@ const QString kSecondaryButtonStyle =
     "QPushButton:hover:enabled { background: palette(midlight); }"
     "QPushButton:disabled { color: palette(mid); border-color: palette(midlight); }";
 
+// Checkable toggle: looks like a secondary button, turns red-tinted (the stall colour) when on.
+const QString kToggleButtonStyle =
+    kSecondaryButtonStyle +
+    "QPushButton:checked { background: rgba(224, 82, 82, 40); border: 1px solid #e05252; }";
+
+const QString kStallLabelStyle =
+    "QLabel { color: #e05252; font-weight: 600; }";
+
 const QString kBannerStyle =
     "QLabel { padding: 8px 12px; border: 1px solid palette(midlight);"
     "  border-radius: 6px; background: palette(alternate-base); color: palette(text); }";
@@ -337,6 +348,10 @@ void OptimizerTab::addActionButtons(QVBoxLayout *layout)
     m_optimizeButton = new QPushButton("Generate Suggestions", this);
     m_loadButton = new QPushButton("Execute Optimized Program", this);
     m_copyButton = new QPushButton("Copy Optimized Assembly", this);
+    m_showStallsButton = new QPushButton("Show stalls", this);
+    m_showStallsButton->setCheckable(true);
+    m_showStallsButton->setToolTip(
+        "Insert a row for every pipeline stall (bubble) the selected hazard model needs.");
 
     m_loadButton->setEnabled(false);
     m_copyButton->setEnabled(false);
@@ -344,7 +359,8 @@ void OptimizerTab::addActionButtons(QVBoxLayout *layout)
     m_optimizeButton->setStyleSheet(kPrimaryButtonStyle);
     m_loadButton->setStyleSheet(kSecondaryButtonStyle);
     m_copyButton->setStyleSheet(kSecondaryButtonStyle);
-    for (QPushButton *button : {m_optimizeButton, m_loadButton, m_copyButton})
+    m_showStallsButton->setStyleSheet(kToggleButtonStyle);
+    for (QPushButton *button : {m_optimizeButton, m_loadButton, m_copyButton, m_showStallsButton})
     {
         button->setMinimumHeight(32);
         button->setCursor(Qt::PointingHandCursor);
@@ -353,11 +369,13 @@ void OptimizerTab::addActionButtons(QVBoxLayout *layout)
     toolbar->addWidget(m_optimizeButton);
     toolbar->addWidget(m_loadButton);
     toolbar->addWidget(m_copyButton);
+    toolbar->addWidget(m_showStallsButton);
     toolbar->addStretch(1);
     layout->addLayout(toolbar);
 
     connect(m_copyButton, &QPushButton::clicked,
             this, &OptimizerTab::copyOptimizedAssembly);
+    connect(m_showStallsButton, &QPushButton::toggled, this, &OptimizerTab::setShowStalls);
 }
 
 void OptimizerTab::addListings(QVBoxLayout *layout)
@@ -366,10 +384,10 @@ void OptimizerTab::addListings(QVBoxLayout *layout)
 
     m_originalOutput = createListingPanel(listingSplitter, "Original instructions",
                                           "Original instruction listing appears here.",
-                                          &m_originalHighlighter);
+                                          &m_originalHighlighter, &m_originalStallLabel);
     m_optimizedOutput = createListingPanel(listingSplitter, "Optimized instructions",
                                            "Optimized instruction listing appears here.",
-                                           &m_optimizedHighlighter);
+                                           &m_optimizedHighlighter, &m_optimizedStallLabel);
 
     auto *legend = new QLabel(
         "<span style='color:#2ea078'>&#9632;</span> moved earlier &nbsp;&nbsp;"
@@ -377,7 +395,8 @@ void OptimizerTab::addListings(QVBoxLayout *layout)
         "Rows without a colour kept their position.<br>"
         "Dependency registers are bold with a coloured underline; each register keeps its colour. "
         "Click an instruction to draw its arrows and expand its details; click it again to "
-        "collapse.<br>"
+        "collapse. Hover an instruction to draw a curve to its position in the other "
+        "listing.<br>"
         "<b>RAW</b> read after write &middot; <b>WAR</b> write after read &middot; "
         "<b>WAW</b> write after write.",
         this);
@@ -386,9 +405,35 @@ void OptimizerTab::addListings(QVBoxLayout *layout)
     legend->setWordWrap(true);
     layout->addWidget(legend);
 
+    m_stallLegend = new QLabel(
+        "<span style='color:#e05252'>&#9640;</span> <b>stall</b> &mdash; a pipeline bubble: the "
+        "instruction below it waits for the register named in brackets (<i>register from "
+        "#producer</i>). Stalls are counted for the code as listed, assuming every branch falls "
+        "through; the benchmark counts only the path that actually runs, so its total can be "
+        "lower.",
+        this);
+    m_stallLegend->setTextFormat(Qt::RichText);
+    m_stallLegend->setStyleSheet(kBannerStyle);
+    m_stallLegend->setWordWrap(true);
+    m_stallLegend->setVisible(false);
+    layout->addWidget(m_stallLegend);
+
     listingSplitter->setStretchFactor(0, 1);
     listingSplitter->setStretchFactor(1, 1);
     layout->addWidget(listingSplitter, 1);
+
+    // Built after the splitter has its final parent: the overlay is a sibling that follows it.
+    m_movementLinks = new MovementLinkOverlay(listingSplitter, m_originalOutput, m_optimizedOutput);
+    m_originalOutput->setHoverChangedCallback([this](std::optional<std::size_t> instruction) {
+        m_movementLinks->setHover(MovementLinkOverlay::Side::Original, instruction);
+    });
+    m_optimizedOutput->setHoverChangedCallback([this](std::optional<std::size_t> instruction) {
+        m_movementLinks->setHover(MovementLinkOverlay::Side::Optimized, instruction);
+    });
+    for (InstructionListingTextEdit *output : {m_originalOutput, m_optimizedOutput})
+        for (QScrollBar *bar : {output->verticalScrollBar(), output->horizontalScrollBar()})
+            connect(bar, &QScrollBar::valueChanged, m_movementLinks,
+                    [overlay = m_movementLinks] { overlay->update(); });
 }
 
 void OptimizerTab::addAnalyzer(QWidget *page)
@@ -535,16 +580,28 @@ void OptimizerTab::copyOptimizedAssembly()
 
 InstructionListingTextEdit *OptimizerTab::createListingPanel(QSplitter *splitter, const QString &title,
                                                  const QString &placeholder,
-                                                 InstructionListingHighlighter **highlighter)
+                                                 InstructionListingHighlighter **highlighter,
+                                                 QLabel **stallLabel)
 {
     auto *panel = new QWidget(splitter);
     auto *panelLayout = new QVBoxLayout(panel);
     panelLayout->setContentsMargins(0, 0, 0, 0);
     panelLayout->setSpacing(6);
 
+    auto *titleRow = new QHBoxLayout();
     auto *titleLabel = new QLabel(title, panel);
     titleLabel->setStyleSheet("font-weight: 600; font-size: 11pt;");
-    panelLayout->addWidget(titleLabel);
+    titleRow->addWidget(titleLabel);
+    titleRow->addStretch(1);
+
+    // Total stall cycles of this listing; only visible while "Show stalls" is on.
+    auto *stalls = new QLabel(panel);
+    stalls->setStyleSheet(kStallLabelStyle);
+    stalls->setVisible(false);
+    titleRow->addWidget(stalls);
+    if (stallLabel)
+        *stallLabel = stalls;
+    panelLayout->addLayout(titleRow);
 
     auto *output = new InstructionListingTextEdit(panel);
     output->setReadOnly(true);
@@ -707,7 +764,7 @@ void OptimizerTab::optimizeCurrentSource()
             optimizer::scheduleProgram(original, forwardingEnabled);
         AssembledProgram optimized = optimizer::buildOptimizedProgram(original, schedule);
 
-        showListings(original, optimized);
+        showListings(original, optimized, forwardingEnabled);
         updateDependencyAnalysis(original);
         if (m_movedCountLabel)
             m_movedCountLabel->setText(
@@ -749,8 +806,12 @@ void OptimizerTab::resetResults()
     m_optimizedOutput->setDependencies({}, {});
     m_originalOutput->setInstructionDetails({});
     m_optimizedOutput->setInstructionDetails({});
+    if (m_movementLinks)
+        m_movementLinks->clear();
     m_originalSourceLineBlocks.clear();
     m_optimizedSourceLineBlocks.clear();
+    m_lastExecutionHighlights.clear();
+    clearStallDisplay();
     for (QLabel *label : {m_instructionCountLabel, m_movedCountLabel,
                           m_rawCountLabel, m_warCountLabel, m_wawCountLabel})
         if (label)
@@ -761,17 +822,53 @@ void OptimizerTab::resetResults()
 }
 
 void OptimizerTab::showListings(const AssembledProgram &original,
-                                const AssembledProgram &optimized)
+                                const AssembledProgram &optimized, bool forwardingEnabled)
 {
-    const ListingView originalListing = buildOriginalListing(original);
+    // Stall rows are only built while the toggle is on; the listings stay byte-for-byte
+    // what they were before when it is off.
+    const bool showStalls = m_showStallsButton && m_showStallsButton->isChecked();
+    std::vector<optimizer::StallInfo> originalStalls;
+    std::vector<optimizer::StallInfo> optimizedStalls;
+    if (showStalls)
+    {
+        originalStalls = optimizer::computeStalls(original, forwardingEnabled);
+        optimizedStalls = optimizer::computeStalls(optimized, forwardingEnabled);
+    }
+
+    const ListingView originalListing =
+        buildOriginalListing(original, showStalls ? &originalStalls : nullptr);
     const std::vector<int> positions = optimizer::originalPositions(original, optimized);
-    const ListingView optimizedListing = buildOptimizedListing(optimized, positions);
+    const ListingView optimizedListing =
+        buildOptimizedListing(optimized, positions, showStalls ? &optimizedStalls : nullptr);
 
     m_originalSourceLineBlocks = originalListing.sourceLineBlocks;
     m_optimizedSourceLineBlocks = optimizedListing.sourceLineBlocks;
+    if (m_movementLinks)
+        m_movementLinks->setMapping(positions, original.intermediate_code.size());
 
     m_originalOutput->setPlainText(originalListing.text);
     m_optimizedOutput->setPlainText(optimizedListing.text);
+    m_originalOutput->setStallBlocks(originalListing.stallBlocks);
+    m_optimizedOutput->setStallBlocks(optimizedListing.stallBlocks);
+
+    const auto showTotal = [showStalls, forwardingEnabled](QLabel *label,
+                                                           const std::vector<optimizer::StallInfo> &stalls) {
+        if (!label)
+            return;
+        label->setVisible(showStalls);
+        if (!showStalls)
+            return;
+        const std::size_t total = optimizer::totalStalls(stalls);
+        label->setText(QString("%1 %2").arg(static_cast<qulonglong>(total))
+                           .arg(total == 1 ? "stall" : "stalls"));
+        label->setToolTip(forwardingEnabled
+                              ? "Stall cycles with forwarding (load-use only), for the code as listed."
+                              : "Stall cycles without forwarding, for the code as listed.");
+    };
+    showTotal(m_originalStallLabel, originalStalls);
+    showTotal(m_optimizedStallLabel, optimizedStalls);
+    if (m_stallLegend)
+        m_stallLegend->setVisible(showStalls);
 
     if (m_originalHighlighter)
         m_originalHighlighter->setDependencyRegisters(
@@ -806,6 +903,40 @@ void OptimizerTab::showListings(const AssembledProgram &original,
         instructionDetailsFor(optimized, &positions, optimizedMovement));
 }
 
+void OptimizerTab::clearStallDisplay()
+{
+    for (InstructionListingTextEdit *output : {m_originalOutput, m_optimizedOutput})
+        if (output)
+            output->setStallBlocks({});
+    for (QLabel *label : {m_originalStallLabel, m_optimizedStallLabel})
+        if (label)
+            label->setVisible(false);
+    if (m_stallLegend)
+        m_stallLegend->setVisible(false);
+}
+
+// "Show stalls" toggled: rebuild both listings from the programs already generated, so
+// nothing is re-scheduled and the suggestions stay exactly as they were.
+void OptimizerTab::setShowStalls(bool show)
+{
+    m_showStallsButton->setText(show ? "Hide stalls" : "Show stalls");
+
+    // Nothing generated yet: the toggle is picked up by the next "Generate Suggestions".
+    if (!m_originalProgram || !m_optimizedProgram)
+        return;
+
+    // Rebuilding the text resets the scroll position and the pipeline-stage highlight.
+    const int originalScroll = m_originalOutput->verticalScrollBar()->value();
+    const int optimizedScroll = m_optimizedOutput->verticalScrollBar()->value();
+
+    showListings(*m_originalProgram, *m_optimizedProgram, m_optimizedWithForwarding);
+
+    m_originalOutput->verticalScrollBar()->setValue(originalScroll);
+    m_optimizedOutput->verticalScrollBar()->setValue(optimizedScroll);
+    if (!m_lastExecutionHighlights.empty())
+        setExecutionHighlights(m_lastExecutionHighlights);
+}
+
 void OptimizerTab::handleOptimizationFailure(const QString &reason)
 {
     m_originalProgram.reset();
@@ -821,6 +952,9 @@ void OptimizerTab::handleOptimizationFailure(const QString &reason)
     m_optimizedOutput->setDependencies({}, {});
     m_originalOutput->setInstructionDetails({});
     m_optimizedOutput->setInstructionDetails({});
+    if (m_movementLinks)
+        m_movementLinks->clear();
+    clearStallDisplay();
     for (QLabel *label : {m_instructionCountLabel, m_movedCountLabel,
                           m_rawCountLabel, m_warCountLabel, m_wawCountLabel})
         if (label)
@@ -836,6 +970,7 @@ void OptimizerTab::handleOptimizationFailure(const QString &reason)
 void OptimizerTab::setExecutionHighlights(
     const std::vector<std::pair<int, std::string>> &editorLines)
 {
+    m_lastExecutionHighlights = editorLines;
     highlightExecutionLines(m_originalOutput, m_originalSourceLineBlocks, editorLines);
     highlightExecutionLines(m_optimizedOutput, m_optimizedSourceLineBlocks, editorLines);
 }

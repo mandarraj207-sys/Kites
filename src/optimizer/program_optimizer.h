@@ -19,12 +19,14 @@ namespace Kites::optimizer
  * instruction back to the line the user wrote.
  * @throws std::runtime_error if the temporary assembly file cannot be written.
  */
+// API: expand custom pseudos, assemble editor source, and preserve source-line mappings.
 AssembledProgram assembleEditorSource(const std::string &rawSource);
 
 /**
  * Schedules each straight-line region of the program independently. Regions
  * keep their length, so labels, branches and their immediates stay valid.
  */
+// API: schedule the assembled program with the selected forwarding policy.
 ScheduleResult scheduleProgram(const AssembledProgram &program, bool forwardingEnabled);
 
 /**
@@ -32,13 +34,16 @@ ScheduleResult scheduleProgram(const AssembledProgram &program, bool forwardingE
  * index-dependent metadata and machine code regenerated.
  * @throws std::runtime_error if a scheduled instruction has no original entry.
  */
+// API: rebuild the assembled program in scheduled order and regenerate metadata/machine code.
 AssembledProgram buildOptimizedProgram(const AssembledProgram &original,
                                        const ScheduleResult &schedule);
 
 /** Marks instructions that a code label points at (addresses are bytes, one 32-bit instruction each). */
+// API: identify instruction indices targeted by code labels.
 std::vector<bool> findLabelBoundaries(const AssembledProgram &program, std::size_t instructionCount);
 
 /** For each optimized instruction, its position in the original program (-1 if unmatched). */
+// API: map optimized instructions to original indices; -1 indicates no match.
 std::vector<int> originalPositions(const AssembledProgram &original,
                                    const AssembledProgram &optimized);
 

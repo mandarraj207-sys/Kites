@@ -12,6 +12,7 @@
 
 namespace Kites::optimizer
 {
+// Module: Build register RAW-dependency records across the program; labels, control flow, and unsupported instructions stop tracking.
 std::vector<RegisterDependency> findRegisterDependencies(const AssembledProgram &program)
 {
     const std::size_t count = program.intermediate_code.size();
@@ -46,6 +47,7 @@ std::vector<RegisterDependency> findRegisterDependencies(const AssembledProgram 
     return dependencies;
 }
 
+// Module: Filter the dependency list to entries touching one instruction.
 std::vector<RegisterDependency> dependenciesOf(const std::vector<RegisterDependency> &all,
                                                std::size_t instruction)
 {

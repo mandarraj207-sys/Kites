@@ -117,11 +117,30 @@ TEST(DependencyGraphTest, UnmodelledInstructionsAreBarriers)
 {
     const auto deps = findRegisterDependencies(programOf({
         makeInstruction("addi", "x5", "x0"),
-        makeInstruction("fcvt.w.s", "x5", "f1"),
+        makeInstruction("custom.unknown", "x5", "f1"),
         makeInstruction("add", "x6", "x5", "x0"),
     }));
 
     EXPECT_TRUE(deps.empty());
+}
+
+
+TEST(DependencyGraphTest, FPComparisonsReadBothFloatingPointOperands)
+{
+    const std::vector<std::string> comparisons = {
+        "feq.s", "flt.s", "fle.s", "feq.d", "flt.d", "fle.d"};
+
+    for (const auto &opcode : comparisons)
+    {
+        const auto deps = findRegisterDependencies(programOf({
+            makeInstruction("fadd.s", "f3", "f4", "f5"),
+            makeInstruction(opcode, "x1", "f2", "f3"),
+            makeInstruction("add", "x6", "x1", "x7"),
+        }));
+
+        EXPECT_TRUE(contains(deps, 0, 1, "f3")) << "opcode=" << opcode;
+        EXPECT_TRUE(contains(deps, 1, 2, "x1")) << "opcode=" << opcode;
+    }
 }
 
 TEST(DependencyGraphTest, DependenciesOfKeepsProducerAndConsumerRolesOnly)

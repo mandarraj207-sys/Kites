@@ -2,7 +2,9 @@
 
 #include "ui/optimizer_tab/instruction_listing_highlighter.h"
 
+#include <QBrush>
 #include <QColor>
+#include <QEvent>
 #include <QList>
 #include <QPaintEvent>
 #include <QPainter>
@@ -17,6 +19,7 @@
 #include <QStringList>
 
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <vector>
 
@@ -42,6 +45,11 @@ constexpr int kMovedRowAlpha = 34;
 constexpr qreal kMovedBarWidth = 3.0;
 const QColor kMovedEarlierColor(46, 160, 120);
 const QColor kMovedLaterColor(224, 150, 40);
+
+// Stall rows (pipeline bubbles): a red hatched band plus a solid bar on the left edge.
+constexpr int kStallRowAlpha = 26;
+constexpr int kStallHatchAlpha = 70;
+const QColor kStallColor(224, 82, 82);
 
 // Colours of the dependency-type chips in the expanded details.
 const QColor kRawColor(224, 82, 82);
@@ -104,6 +112,28 @@ void appendLabels(ListingView &view, const LabelsByInstruction &labels,
     {
         view.text += numberColumn(static_cast<qlonglong>(instructionIndex + 1), kIndexWidth) +
                      " | " + assemblyCell(QString("%1:").arg(name)) + "\n";
+        ++blockNumber;
+    }
+}
+
+// One row per bubble cycle in front of an instruction. The first row says what the
+// instruction waits for: the register and the number the producer has in the "#" column.
+void appendStallRows(ListingView &view, const optimizer::StallInfo &stall, int &blockNumber)
+{
+    for (std::size_t k = 0; k < stall.cycles; ++k)
+    {
+        QString text = kStallRowMarker;
+        if (stall.cycles > 1)
+            text += QString(" %1/%2")
+                        .arg(static_cast<qulonglong>(k + 1))
+                        .arg(static_cast<qulonglong>(stall.cycles));
+        if (k == 0)
+            text += QString("  (%1 from #%2)")
+                        .arg(QString::fromStdString(stall.reg))
+                        .arg(static_cast<qulonglong>(stall.producer + 1));
+
+        view.text += listingColumn(QString(), kIndexWidth) + " | " + assemblyCell(text) + "\n";
+        view.stallBlocks.push_back(blockNumber);
         ++blockNumber;
     }
 }
@@ -190,7 +220,8 @@ std::string formatAssemblyInstruction(const ICUnit &instruction)
     return op;
 }
 
-ListingView buildOriginalListing(const AssembledProgram &original)
+ListingView buildOriginalListing(const AssembledProgram &original,
+                                 const std::vector<optimizer::StallInfo> *stalls)
 {
     ListingView view;
     view.text += listingColumn("#", kIndexWidth, true) + " | " + assemblyCell("ASSEMBLY") + "\n";
@@ -201,6 +232,8 @@ ListingView buildOriginalListing(const AssembledProgram &original)
     for (std::size_t i = 0; i < original.intermediate_code.size(); ++i)
     {
         appendLabels(view, labels, i, blockNumber);
+        if (stalls && i < stalls->size())
+            appendStallRows(view, (*stalls)[i], blockNumber);
         const ICUnit &instruction = original.intermediate_code[i].first;
         view.instructionBlocks.push_back(blockNumber);
         view.text += numberColumn(static_cast<qlonglong>(i + 1), kIndexWidth) + " | " +
@@ -215,7 +248,8 @@ ListingView buildOriginalListing(const AssembledProgram &original)
 // The original position and moved/unchanged state are no longer printed as
 // columns: they are shown as row colours and in the expanded details instead.
 ListingView buildOptimizedListing(const AssembledProgram &optimized,
-                                  const std::vector<int> &originalPositions)
+                                  const std::vector<int> &originalPositions,
+                                  const std::vector<optimizer::StallInfo> *stalls)
 {
     Q_UNUSED(originalPositions);
 
@@ -228,6 +262,8 @@ ListingView buildOptimizedListing(const AssembledProgram &optimized,
     for (std::size_t i = 0; i < optimized.intermediate_code.size(); ++i)
     {
         appendLabels(view, labels, i, blockNumber);
+        if (stalls && i < stalls->size())
+            appendStallRows(view, (*stalls)[i], blockNumber);
         const ICUnit &instruction = optimized.intermediate_code[i].first;
         view.instructionBlocks.push_back(blockNumber);
         view.text += numberColumn(static_cast<qlonglong>(i + 1), kIndexWidth) + " | " +
@@ -242,6 +278,9 @@ ListingView buildOptimizedListing(const AssembledProgram &optimized,
 InstructionListingTextEdit::InstructionListingTextEdit(QWidget *parent)
     : QPlainTextEdit(parent)
 {
+    // Mouse-move events are only delivered without a pressed button when the viewport tracks.
+    setMouseTracking(true);
+    viewport()->setMouseTracking(true);
 }
 
 void InstructionListingTextEdit::setDependencyHighlighter(
@@ -261,6 +300,7 @@ void InstructionListingTextEdit::setDependencies(
     for (std::size_t i = 0; i < m_instructionBlocks.size(); ++i)
         m_instructionForBlock[m_instructionBlocks[i]] = i;
 
+    m_hovered.reset();
     selectInstruction(std::nullopt);
 }
 
@@ -282,10 +322,65 @@ void InstructionListingTextEdit::setInstructionDetails(std::vector<InstructionDe
     viewport()->update();
 }
 
+void InstructionListingTextEdit::setStallBlocks(std::vector<int> blocks)
+{
+    m_stallBlocks = std::move(blocks);
+    viewport()->update();
+}
+
 void InstructionListingTextEdit::setSelectionChangedCallback(
     std::function<void(const QString &)> callback)
 {
     m_selectionChanged = std::move(callback);
+}
+
+void InstructionListingTextEdit::setHoverChangedCallback(
+    std::function<void(std::optional<std::size_t>)> callback)
+{
+    m_hoverChanged = std::move(callback);
+}
+
+void InstructionListingTextEdit::updateHover(std::optional<std::size_t> instruction)
+{
+    if (m_hovered == instruction)
+        return;
+    m_hovered = instruction;
+    if (m_hoverChanged)
+        m_hoverChanged(instruction);
+}
+
+void InstructionListingTextEdit::mouseMoveEvent(QMouseEvent *event)
+{
+    QPlainTextEdit::mouseMoveEvent(event);
+
+    // cursorForPosition snaps to the nearest line, so check the mouse is really on the row.
+    std::optional<std::size_t> hovered;
+    const auto found =
+        m_instructionForBlock.find(cursorForPosition(event->pos()).block().blockNumber());
+    if (found != m_instructionForBlock.end() && found->second < m_instructionBlocks.size())
+    {
+        const QRectF row = rowRect(found->second);
+        if (event->pos().y() >= row.top() && event->pos().y() <= row.bottom())
+            hovered = found->second;
+    }
+    updateHover(hovered);
+}
+
+// The mouse leaving the viewport is reported to the viewport, not to the text edit itself.
+bool InstructionListingTextEdit::viewportEvent(QEvent *event)
+{
+    if (event->type() == QEvent::Leave)
+        updateHover(std::nullopt);
+    return QPlainTextEdit::viewportEvent(event);
+}
+
+std::optional<InstructionGeometry> InstructionListingTextEdit::instructionGeometry(
+    std::size_t instruction) const
+{
+    const auto metrics = rowMetrics(instruction);
+    if (!metrics)
+        return std::nullopt;
+    return InstructionGeometry{rowRect(instruction), metrics->textEndX};
 }
 
 // Rich text for the expandable panel under the listing: what the clicked
@@ -395,6 +490,7 @@ void InstructionListingTextEdit::paintEvent(QPaintEvent *event)
 
     QPainter painter(viewport());
     paintMovedRows(painter, event->rect());
+    paintStallRows(painter, event->rect());
     paintProducerBoxes(painter, event->rect());
     paintDependencySelection(painter);
 }
@@ -419,6 +515,30 @@ void InstructionListingTextEdit::paintMovedRows(QPainter &painter, const QRect &
         tint.setAlpha(kMovedRowAlpha);
         painter.fillRect(row, tint);
         painter.fillRect(QRectF(row.left(), row.top(), kMovedBarWidth, row.height()), color);
+    }
+}
+
+void InstructionListingTextEdit::paintStallRows(QPainter &painter, const QRect &dirtyRect)
+{
+    for (const int blockNumber : m_stallBlocks)
+    {
+        const QTextBlock block = document()->findBlockByNumber(blockNumber);
+        if (!block.isValid())
+            continue;
+
+        const QRectF geometry = blockBoundingGeometry(block).translated(contentOffset());
+        if (geometry.bottom() < dirtyRect.top() || geometry.top() > dirtyRect.bottom())
+            continue;
+
+        const QRectF row(0, geometry.top(), viewport()->width(), geometry.height());
+        QColor tint = kStallColor;
+        tint.setAlpha(kStallRowAlpha);
+        painter.fillRect(row, tint);
+
+        QColor hatch = kStallColor;
+        hatch.setAlpha(kStallHatchAlpha);
+        painter.fillRect(row, QBrush(hatch, Qt::BDiagPattern));
+        painter.fillRect(QRectF(row.left(), row.top(), kMovedBarWidth, row.height()), kStallColor);
     }
 }
 

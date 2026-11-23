@@ -4,6 +4,7 @@
 // Diff it against your real header and keep your own include paths / any extra members.
 
 #include "ui/optimizer_tab/dependency_arrows.h" // DependencyArrowLayout, RowMetrics, RowLookup
+#include "optimizer/stall_model.h"                // optimizer::StallInfo
 
 // TODO: use your project's real includes for these types:
 //   AssembledProgram, ICUnit, optimizer::RegisterDependency / dependenciesOf
@@ -23,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+class QEvent;
 class QMouseEvent;
 class QPaintEvent;
 class QPainter;
@@ -36,6 +38,7 @@ struct ListingView
     QString text;
     std::vector<int> instructionBlocks;                 // text block number of each instruction
     std::map<int, std::vector<int>> sourceLineBlocks;   // editor line -> text blocks
+    std::vector<int> stallBlocks;                       // text block number of every stall row
 };
 
 // NEW: everything the expandable details panel needs about one instruction.
@@ -51,13 +54,24 @@ struct InstructionDetail
 
 std::string formatAssemblyInstruction(const ICUnit &instruction);
 
-ListingView buildOriginalListing(const AssembledProgram &original);
+// `stalls` (one entry per instruction, see optimizer::computeStalls) is optional: when
+// given, a "-- stall" row is inserted for every bubble cycle in front of an instruction.
+ListingView buildOriginalListing(const AssembledProgram &original,
+                                 const std::vector<optimizer::StallInfo> *stalls = nullptr);
 ListingView buildOptimizedListing(const AssembledProgram &optimized,
-                                  const std::vector<int> &originalPositions);
+                                  const std::vector<int> &originalPositions,
+                                  const std::vector<optimizer::StallInfo> *stalls = nullptr);
 
 void highlightExecutionLines(QPlainTextEdit *view,
                              const std::map<int, std::vector<int>> &sourceLineBlocks,
                              const std::vector<std::pair<int, std::string>> &editorLines);
+
+// Where an instruction's row sits, in viewport coordinates.
+struct InstructionGeometry
+{
+    QRectF row;          // full-width band of the row
+    qreal textEndX = 0;  // x just after the last character of the row
+};
 
 class InstructionListingTextEdit : public QPlainTextEdit
 {
@@ -71,13 +85,22 @@ public:
     // NEW
     void setInstructionDetails(std::vector<InstructionDetail> details);
     void setSelectionChangedCallback(std::function<void(const QString &)> callback);
+    void setStallBlocks(std::vector<int> blocks); // NEW: rows to paint as pipeline bubbles
+
+    // NEW: hover support for the movement link. The callback gets the instruction under the
+    // mouse, or nullopt when the mouse is not over an instruction row.
+    void setHoverChangedCallback(std::function<void(std::optional<std::size_t>)> callback);
+    std::optional<InstructionGeometry> instructionGeometry(std::size_t instruction) const;
 
 protected:
     void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    bool viewportEvent(QEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
 
 private:
     void selectInstruction(std::optional<std::size_t> instruction);
+    void updateHover(std::optional<std::size_t> instruction);
     QRectF rowRect(std::size_t instruction) const;
     std::optional<RowMetrics> rowMetrics(std::size_t instruction) const;
 
@@ -86,6 +109,7 @@ private:
 
     // NEW
     void paintMovedRows(QPainter &painter, const QRect &dirtyRect);
+    void paintStallRows(QPainter &painter, const QRect &dirtyRect);
     QString detailsHtml(std::size_t instruction) const;
 
     const InstructionListingHighlighter *m_dependencyHighlighter = nullptr;
@@ -97,7 +121,10 @@ private:
 
     // NEW
     std::vector<InstructionDetail> m_details;
+    std::vector<int> m_stallBlocks;
     std::function<void(const QString &)> m_selectionChanged;
+    std::function<void(std::optional<std::size_t>)> m_hoverChanged;
+    std::optional<std::size_t> m_hovered;
 };
 
 } // namespace Kites
