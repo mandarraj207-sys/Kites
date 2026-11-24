@@ -249,16 +249,22 @@ DependencyCounts countDependencies(const AssembledProgram &program)
                 break;
         }
 
+        // Count RAW only from the latest preceding writer in this region.
+        std::map<std::string, std::size_t> lastWriter;
         for (std::size_t i = begin; i < end; ++i)
         {
+            for (const auto &reg : info[i].reads)
+            {
+                if (lastWriter.find(reg) != lastWriter.end())
+                    ++counts.raw;
+            }
+            for (const auto &reg : info[i].writes)
+                lastWriter[reg] = i;
+
             for (std::size_t j = i + 1; j < end; ++j)
             {
                 const auto &a = info[i];
                 const auto &b = info[j];
-
-                for (const auto &reg : a.writes)
-                    if (std::find(b.reads.begin(), b.reads.end(), reg) != b.reads.end())
-                        ++counts.raw;
 
                 for (const auto &reg : a.reads)
                     if (std::find(b.writes.begin(), b.writes.end(), reg) != b.writes.end())

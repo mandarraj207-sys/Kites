@@ -1,0 +1,245 @@
+// contains long codes that are meaningful and perform a certain task
+
+// Test:1 Calculator
+.text
+
+main:
+    jal x0, calculator_self_test
+
+calculator:
+    addi x5, x0, 0
+    beq a2, x5, calc_add
+
+    addi x5, x0, 1
+    beq a2, x5, calc_sub
+
+    addi x5, x0, 2
+    beq a2, x5, calc_mul
+
+    addi x5, x0, 3
+    beq a2, x5, calc_div
+
+    addi x5, x0, 4
+    beq a2, x5, calc_rem
+
+    addi x5, x0, 5
+    beq a2, x5, calc_and
+
+    addi x5, x0, 6
+    beq a2, x5, calc_or
+
+    addi x5, x0, 7
+    beq a2, x5, calc_xor
+
+    addi x5, x0, 8
+    beq a2, x5, calc_sll
+
+    addi x5, x0, 9
+    beq a2, x5, calc_srl
+
+    addi x5, x0, 10
+    beq a2, x5, calc_sra
+
+    addi x5, x0, 11
+    beq a2, x5, calc_slt
+
+    jal x0, calc_bad_operation
+
+calc_add:
+    add a0, a0, a1
+    addi a1, x0, 0
+    jalr x0, 0(ra)
+
+calc_sub:
+    sub a0, a0, a1
+    addi a1, x0, 0
+    jalr x0, 0(ra)
+
+calc_mul:
+    mul a0, a0, a1
+    addi a1, x0, 0
+    jalr x0, 0(ra)
+
+calc_div:
+    beq a1, x0, calc_divide_by_zero
+    div a0, a0, a1
+    addi a1, x0, 0
+    jalr x0, 0(ra)
+
+calc_rem:
+    beq a1, x0, calc_divide_by_zero
+    rem a0, a0, a1
+    addi a1, x0, 0
+    jalr x0, 0(ra)
+
+calc_and:
+    and a0, a0, a1
+    addi a1, x0, 0
+    jalr x0, 0(ra)
+
+calc_or:
+    or a0, a0, a1
+    addi a1, x0, 0
+    jalr x0, 0(ra)
+
+calc_xor:
+    xor a0, a0, a1
+    addi a1, x0, 0
+    jalr x0, 0(ra)
+
+calc_sll:
+    sll a0, a0, a1
+    addi a1, x0, 0
+    jalr x0, 0(ra)
+
+calc_srl:
+    srl a0, a0, a1
+    addi a1, x0, 0
+    jalr x0, 0(ra)
+
+calc_sra:
+    sra a0, a0, a1
+    addi a1, x0, 0
+    jalr x0, 0(ra)
+
+calc_slt:
+    slt a0, a0, a1
+    addi a1, x0, 0
+    jalr x0, 0(ra)
+
+calc_divide_by_zero:
+    addi a0, x0, 0
+    addi a1, x0, 1
+    jalr x0, 0(ra)
+
+calc_bad_operation:
+    addi a0, x0, 0
+    addi a1, x0, 2
+    jalr x0, 0(ra)
+
+
+# Self-test driver.
+# Start execution at calculator_self_test.
+#
+# Result registers:
+#   x14..x28 = results of tests 1..15
+#   x29      = status from test 13 (divide by zero)
+#   x30      = status from test 14 (remainder by zero)
+#   x31      = status from test 15 (invalid operation)
+#
+# Expected results:
+#   x14=42, x15=58, x16=56, x17=20, x18=1
+#   x19=8,  x20=14, x21=6,  x22=12, x23=8
+#   x24=8,  x25=1,  x26=0, x27=0, x28=0
+#   x29=1,  x30=1,  x31=2
+
+calculator_self_test:
+    # Test 1: 25 + 17 = 42
+    addi a0, x0, 25
+    addi a1, x0, 17
+    addi a2, x0, 0
+    jal ra, calculator
+    addi x14, a0, 0
+
+    # Test 2: 90 - 32 = 58
+    addi a0, x0, 90
+    addi a1, x0, 32
+    addi a2, x0, 1
+    jal ra, calculator
+    addi x15, a0, 0
+
+    # Test 3: 7 * 8 = 56
+    addi a0, x0, 7
+    addi a1, x0, 8
+    addi a2, x0, 2
+    jal ra, calculator
+    addi x16, a0, 0
+
+    # Test 4: 100 / 5 = 20
+    addi a0, x0, 100
+    addi a1, x0, 5
+    addi a2, x0, 3
+    jal ra, calculator
+    addi x17, a0, 0
+
+    # Test 5: 100 % 9 = 1
+    addi a0, x0, 100
+    addi a1, x0, 9
+    addi a2, x0, 4
+    jal ra, calculator
+    addi x18, a0, 0
+
+    # Test 6: 12 & 10 = 8
+    addi a0, x0, 12
+    addi a1, x0, 10
+    addi a2, x0, 5
+    jal ra, calculator
+    addi x19, a0, 0
+
+    # Test 7: 12 | 10 = 14
+    addi a0, x0, 12
+    addi a1, x0, 10
+    addi a2, x0, 6
+    jal ra, calculator
+    addi x20, a0, 0
+
+    # Test 8: 12 ^ 10 = 6
+    addi a0, x0, 12
+    addi a1, x0, 10
+    addi a2, x0, 7
+    jal ra, calculator
+    addi x21, a0, 0
+
+    # Test 9: 3 << 2 = 12
+    addi a0, x0, 3
+    addi a1, x0, 2
+    addi a2, x0, 8
+    jal ra, calculator
+    addi x22, a0, 0
+
+    # Test 10: 32 >> 2 = 8
+    addi a0, x0, 32
+    addi a1, x0, 2
+    addi a2, x0, 9
+    jal ra, calculator
+    addi x23, a0, 0
+
+    # Test 11: 32 >>> 2 = 8
+    addi a0, x0, 32
+    addi a1, x0, 2
+    addi a2, x0, 10
+    jal ra, calculator
+    addi x24, a0, 0
+
+    # Test 12: 4 < 9 = 1
+    addi a0, x0, 4
+    addi a1, x0, 9
+    addi a2, x0, 11
+    jal ra, calculator
+    addi x25, a0, 0
+
+    # Test 13: 10 / 0 -> result 0, status 1
+    addi a0, x0, 10
+    addi a1, x0, 0
+    addi a2, x0, 3
+    jal ra, calculator
+    addi x26, a0, 0
+    addi x29, a1, 0
+
+    # Test 14: 5 % 0 -> result 0, status 1
+    addi a0, x0, 5
+    addi a1, x0, 0
+    addi a2, x0, 4
+    jal ra, calculator
+    addi x27, a0, 0
+    addi x30, a1, 0
+
+    # Test 15: invalid operation -> result 0, status 2
+    addi a0, x0, 5
+    addi a1, x0, 6
+    addi a2, x0, 99
+    jal ra, calculator
+    addi x28, a0, 0
+    addi x31, a1, 0
+
+self_test_done:

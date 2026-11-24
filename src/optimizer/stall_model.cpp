@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <deque>
+#include <unordered_set>
 
 #include "optimizer/scheduler_core.h"
 
@@ -45,28 +46,36 @@ std::vector<StallInfo> computeStalls(const AssembledProgram &program, bool forwa
         const detail::InstructionInfo info = detail::describe(unit);
 
         StallInfo stall;
+        // Recent instructions are traversed newest-first. Only the latest
+        // writer of a register can supply the value consumed here.
+        std::unordered_set<std::string> latestWriterSeen;
+
         for (const Issued &earlier : recent)
         {
             const std::size_t distance = nextSlot - earlier.slot;
-            const std::size_t required = forwardingEnabled ? (earlier.isLoad ? 2 : 1) : 3;
-            if (distance >= required)
-                continue;
-            if (forwardingEnabled && !earlier.isLoad)
-                continue; // forwarded from EX/MEM, no bubble
-
-            const std::size_t needed = required - distance;
-            if (needed <= stall.cycles)
-                continue;
-
-            for (const std::string &reg : info.reads)
+            for (const std::string &reg : earlier.writes)
             {
-                if (std::find(earlier.writes.begin(), earlier.writes.end(), reg) ==
-                    earlier.writes.end())
+                if (!latestWriterSeen.insert(reg).second)
                     continue;
+
+                if (std::find(info.reads.begin(), info.reads.end(), reg) ==
+                    info.reads.end())
+                    continue;
+
+                const std::size_t required =
+                    forwardingEnabled ? (earlier.isLoad ? 2 : 1) : 3;
+                if (forwardingEnabled && !earlier.isLoad)
+                    continue; // forwarded from EX/MEM, no bubble
+                if (distance >= required)
+                    continue;
+
+                const std::size_t needed = required - distance;
+                if (needed <= stall.cycles)
+                    continue;
+
                 stall.cycles = needed;
                 stall.producer = earlier.instruction;
                 stall.reg = reg;
-                break;
             }
         }
 
