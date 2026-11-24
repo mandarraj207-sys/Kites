@@ -45,3 +45,5 @@ cmake-build-*/
 *.log
 *.bak
 build-optimizer-tests/
+/ssh_token
+/ssh_token.pub
